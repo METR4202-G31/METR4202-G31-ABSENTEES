@@ -28,3 +28,5 @@ Example (also loads world file and spawns turtlebot):
 ```bash
 TURTLEBOT3_MODEL=waffle_pi ros2 launch simple_explorer exploration_demo.launch.py [world:=/path/to/world.world]
 ```
+## navigation_supervisor
+This package will handle a given pose from the frontier detection algorithm to investigate. Locations found to be inaccessible will be added to a list to avoid for future poses.
