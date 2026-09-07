@@ -1,0 +1,31 @@
+# Goal
+geometry_msgs/PoseStamped target_pose
+
+---
+# Result
+
+uint8 SUCCEEDED=0
+uint8 BLACKLISTED=1
+uint8 PLANNING_FAILED=2
+uint8 NAVIGATION_FAILED=3
+uint8 STUCK=4
+uint8 CANCELED=5
+uint8 INVALID_GOAL=6
+uint8 INTERNAL_ERROR=7
+
+uint8 result_code
+string message
+bool failed_region_recorded
+
+---
+# Feedback
+
+uint8 CHECKING_GOAL=0
+uint8 PLANNING=1
+uint8 NAVIGATING=2
+uint8 CANCELING=3
+
+uint8 state
+float32 distance_remaining
+builtin_interfaces/Duration navigation_time
+uint16 recovery_count
