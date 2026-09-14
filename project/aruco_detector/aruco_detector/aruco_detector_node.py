@@ -82,6 +82,7 @@ class ArucoDetector(Node):
         #publish one ArucoVerdict() message to /aruco per marker detected
         for i in range(len(ids)):
             aruco_message = ArucoVerdict()
+            aruco_message.header = msg.header
             aruco_message.detected = True
             aruco_message.id = int(ids[i][0])
             aruco_message.pose = self.build_pose(tvecs[i][0], rvecs[i][0])
