@@ -8,6 +8,7 @@ from nav2_simple_commander.robot_navigator import TaskResult
 
 from navigation_supervisor.navigation_supervisor import NavigationSupervisor
 from navigation_supervisor.navigation_types import (
+    FailureReason,
     NavigationOutcome,
     NavigationState,
 )
@@ -198,4 +199,90 @@ def test_navigation_can_be_canceled(
     outcome = supervisor.update()
 
     assert outcome == NavigationOutcome.CANCELED
+    assert supervisor.state == NavigationState.IDLE
+
+
+def test_failed_navigation_records_failed_region(
+    supervisor,
+    monkeypatch,
+):
+    """Record the failed goal location after Nav2 reports failure."""
+    monkeypatch.setattr(
+        supervisor,
+        "goToPose",
+        lambda goal: True,
+    )
+
+    supervisor.submit_goal(make_goal(x=1.5, y=-0.5))
+    supervisor.update()
+
+    monkeypatch.setattr(
+        supervisor,
+        "isTaskComplete",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "getResult",
+        lambda: TaskResult.FAILED,
+    )
+
+    outcome = supervisor.update()
+
+    assert outcome == NavigationOutcome.NAVIGATION_FAILED
+
+    regions = supervisor._failed_region_manager.get_regions()
+
+    assert len(regions) == 1
+    assert regions[0].center_x == pytest.approx(1.5)
+    assert regions[0].center_y == pytest.approx(-0.5)
+    assert regions[0].failure_count == 1
+
+
+def test_successful_navigation_does_not_record_failed_region(
+    supervisor,
+    monkeypatch,
+):
+    """Do not create a failed region after successful navigation."""
+    monkeypatch.setattr(
+        supervisor,
+        "goToPose",
+        lambda goal: True,
+    )
+
+    supervisor.submit_goal(make_goal())
+    supervisor.update()
+
+    monkeypatch.setattr(
+        supervisor,
+        "isTaskComplete",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "getResult",
+        lambda: TaskResult.SUCCEEDED,
+    )
+
+    outcome = supervisor.update()
+
+    assert outcome == NavigationOutcome.SUCCEEDED
+    assert len(supervisor._failed_region_manager.get_regions()) == 0
+
+
+def test_goal_inside_failed_region_is_rejected(
+    supervisor,
+):
+    """Reject a goal that lies inside an existing failed region."""
+    supervisor._failed_region_manager.record_failure(
+        x=1.0,
+        y=2.0,
+        failure_reason=FailureReason.NAV_ABORTED,
+        timestamp=1.0,
+    )
+
+    accepted = supervisor.submit_goal(make_goal(x=1.1, y=2.0))
+
+    assert accepted is False
+    assert supervisor.last_outcome == NavigationOutcome.BLACKLISTED
     assert supervisor.state == NavigationState.IDLE

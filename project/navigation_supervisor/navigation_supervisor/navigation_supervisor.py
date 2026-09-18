@@ -9,7 +9,20 @@ import rclpy
 from geometry_msgs.msg import PoseStamped
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 
-from .navigation_types import NavigationOutcome, NavigationState
+from navigation_interfaces.msg import FailedRegion, FailedRegionArray
+
+from rclpy.qos import (
+    DurabilityPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+)
+
+from .failed_region_manager import FailedRegionManager
+from .navigation_types import (
+    FailureReason,
+    NavigationOutcome,
+    NavigationState,
+)
 
 
 class NavigationSupervisor(BasicNavigator):
@@ -46,10 +59,43 @@ class NavigationSupervisor(BasicNavigator):
             10,
         )
 
+        self.declare_parameter("failed_region_radius", 0.30)
+        self.declare_parameter("failed_regions_topic", "/failed_regions")
+
+        failed_region_radius = (
+            self.get_parameter("failed_region_radius")
+            .get_parameter_value()
+            .double_value
+        )
+
+        self._failed_regions_topic = (
+            self.get_parameter("failed_regions_topic")
+            .get_parameter_value()
+            .string_value
+        )
+
+        self._failed_region_manager = FailedRegionManager(
+            radius=failed_region_radius,
+        )
+
+        failed_regions_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+
+        self._failed_regions_publisher = self.create_publisher(
+            FailedRegionArray,
+            self._failed_regions_topic,
+            failed_regions_qos,
+        )
+
         self.get_logger().info(
             f"Navigation Supervisor initialised. "
             f"Listening for goals on '{self._goal_topic}'."
         )
+
+        self._publish_failed_regions()
 
     @property
     def state(self) -> NavigationState:
@@ -84,6 +130,20 @@ class NavigationSupervisor(BasicNavigator):
 
         if validated_goal is None:
             self._last_outcome = NavigationOutcome.INVALID_GOAL
+            self._transition_to(NavigationState.IDLE)
+            return False
+
+        blocked_region = self._failed_region_manager.find_blocking_region(
+            validated_goal.pose.position.x,
+            validated_goal.pose.position.y,
+        )
+
+        if blocked_region is not None:
+            self.get_logger().warn(
+                "Rejected goal because it lies inside failed region "
+                f"{blocked_region.region_id}."
+            )
+            self._last_outcome = NavigationOutcome.BLACKLISTED
             self._transition_to(NavigationState.IDLE)
             return False
 
@@ -139,6 +199,7 @@ class NavigationSupervisor(BasicNavigator):
             outcome = NavigationOutcome.CANCELED
 
         elif result == TaskResult.FAILED:
+            self._record_current_goal_failure()
             outcome = NavigationOutcome.NAVIGATION_FAILED
 
         else:
@@ -308,6 +369,81 @@ class NavigationSupervisor(BasicNavigator):
     def _goal_callback(self, msg: PoseStamped) -> None:
         """Submit an incoming goal pose for navigation."""
         self.submit_goal(msg)
+
+    def _record_current_goal_failure(self) -> None:
+        """Record the current goal as a failed navigation region."""
+        if self._current_goal is None:
+            self.get_logger().warn(
+                "Navigation failed but no current goal was available."
+            )
+            return
+
+        position = self._current_goal.pose.position
+
+        now_seconds = self.get_clock().now().nanoseconds / 1_000_000_000.0
+
+        region = self._failed_region_manager.record_failure(
+            x=position.x,
+            y=position.y,
+            failure_reason=FailureReason.NAV_ABORTED,
+            timestamp=now_seconds,
+        )
+
+        self.get_logger().warn(
+            "Recorded failed navigation region "
+            f"{region.region_id} at "
+            f"({region.center_x:.2f}, {region.center_y:.2f})."
+        )
+
+        self._publish_failed_regions()
+
+    def _publish_failed_regions(self) -> None:
+        """Publish the complete current failed-region blacklist."""
+        msg = FailedRegionArray()
+
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self._global_frame
+
+        for record in self._failed_region_manager.get_regions():
+            region_msg = FailedRegion()
+
+            region_msg.region_id = record.region_id
+
+            region_msg.center.x = record.center_x
+            region_msg.center.y = record.center_y
+            region_msg.center.z = 0.0
+
+            region_msg.radius = record.radius
+            region_msg.failure_count = record.failure_count
+
+            if record.last_failure_reason == FailureReason.NAV_ABORTED:
+                region_msg.last_failure_reason = FailedRegion.NAVIGATION_FAILED
+            elif record.last_failure_reason == FailureReason.NO_PROGRESS:
+                region_msg.last_failure_reason = FailedRegion.STUCK
+            elif record.last_failure_reason == FailureReason.NAV_TIMEOUT:
+                region_msg.last_failure_reason = FailedRegion.NAVIGATION_TIMEOUT
+            else:
+                region_msg.last_failure_reason = FailedRegion.PLANNING_FAILED
+
+            first_seconds = int(record.first_failure_time)
+            first_nanoseconds = int(
+                (record.first_failure_time - first_seconds) * 1_000_000_000
+            )
+
+            region_msg.first_failure_time.sec = first_seconds
+            region_msg.first_failure_time.nanosec = first_nanoseconds
+
+            last_seconds = int(record.last_failure_time)
+            last_nanoseconds = int(
+                (record.last_failure_time - last_seconds) * 1_000_000_000
+            )
+
+            region_msg.last_failure_time.sec = last_seconds
+            region_msg.last_failure_time.nanosec = last_nanoseconds
+
+            msg.regions.append(region_msg)
+
+        self._failed_regions_publisher.publish(msg)
 
 
 def main(args=None) -> None:
