@@ -6,7 +6,6 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
-    SetEnvironmentVariable,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -17,7 +16,6 @@ from launch_ros.actions import Node
 def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
 
-    gazebo_ros_dir = get_package_share_directory("gazebo_ros")
     nav2_bringup_dir = get_package_share_directory("nav2_bringup")
     slam_toolbox_dir = get_package_share_directory("slam_toolbox")
 
@@ -77,15 +75,24 @@ def generate_launch_description():
         ],
     )
 
+    explorer_params = os.path.join(
+        get_package_share_directory("simple_explorer"),
+        "config",
+        "frontier_explorer.yaml",
+    )
+
+    # Needs a ManagedNavigate action server (navigation_supervisor) to send
+    # goals to; until it is running the explorer just reports WAITING.
     explorer = Node(
         package="simple_explorer",
-        executable="simple_frontier_explorer",
-        name="simple_frontier_explorer",
+        executable="frontier_explorer",
+        name="frontier_explorer",
         output="screen",
         parameters=[
+            explorer_params,
             {
                 "use_sim_time": use_sim_time,
-            }
+            },
         ],
     )
 

@@ -193,22 +193,33 @@ def generate_launch_description():
     )
 
     # ---------------------------------------------------------
-    # Simple frontier exploration demonstration
+    # Frontier explorer
     #
     # Uses:
-    #   /map
-    #   Nav2 NavigateToPose
+    #   /map, /global_costmap/costmap, /local_costmap/costmap
+    #   /failed_regions, /explore/resume
+    #   ManagedNavigate action (navigation_supervisor)
+    #   Nav2 compute_path_to_pose (goal pre-check)
     # ---------------------------------------------------------
 
+    explorer_params = os.path.join(
+        get_package_share_directory("simple_explorer"),
+        "config",
+        "frontier_explorer.yaml",
+    )
+
+    # Needs a ManagedNavigate action server (navigation_supervisor) to send
+    # goals to; until it is running the explorer just reports WAITING.
     explorer = Node(
         package="simple_explorer",
-        executable="simple_frontier_explorer",
-        name="simple_frontier_explorer",
+        executable="frontier_explorer",
+        name="frontier_explorer",
         output="screen",
         parameters=[
+            explorer_params,
             {
                 "use_sim_time": use_sim_time,
-            }
+            },
         ],
     )
 
