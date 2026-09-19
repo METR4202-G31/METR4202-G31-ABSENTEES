@@ -17,7 +17,7 @@ features:="room:3,dead_end:2,narrow_passage:4,large_empty_space:1,l_corridor:3,w
 ```
 
 ## simple_explorer
-This package is a proof-of-concept environment exploration algorithm. It sends nav2 goals to the robot.
+Frontier exploration. The `frontier_explorer` node finds frontiers in the SLAM map, checks candidate goals against the Nav2 costmaps, the robot's position and a blacklist, and sends each goal to the navigation supervisor's `ManagedNavigate` action. Every goal is also published on `/explore` as a plain `PoseStamped`. Mission control can stop or resume it with `/explore/resume` (`Bool`) and reads `/explore/status`. See `project/simple_explorer/README.md` for the interfaces.
 
 Example:
 ```bash

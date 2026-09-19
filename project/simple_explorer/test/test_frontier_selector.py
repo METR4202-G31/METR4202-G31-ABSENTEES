@@ -1,13 +1,11 @@
 """
 Unit tests for frontier_selector.FrontierSelector.
 
-These run as plain pytest against synthetic OccupancyGrid messages -- no
-Gazebo, Nav2, or even a running ROS graph needed. Run with:
+These run as plain pytest against synthetic OccupancyGrid messages: no
+Gazebo, Nav2 or ROS graph needed, only a sourced ROS environment so that
+nav_msgs and geometry_msgs import. Run from the package directory with:
 
     python3 -m pytest test/test_frontier_selector.py -v
-
-(from the simple_explorer package directory, with ROS humble sourced so
-nav_msgs/geometry_msgs are importable).
 """
 
 import math
@@ -16,12 +14,19 @@ from geometry_msgs.msg import Pose
 from nav_msgs.msg import OccupancyGrid
 import pytest
 
-from simple_explorer.frontier_selector import FrontierSelector
+from simple_explorer.frontier_selector import (
+    CostmapLayer,
+    frontier_near,
+    FrontierSelector,
+)
 
 
 def make_grid(rows, resolution=1.0, origin=(0.0, 0.0)):
-    """Build an OccupancyGrid from a list of strings, one per row (top row
-    is highest y). Characters: '.' free, '#' occupied, '?' unknown."""
+    """
+    Build an OccupancyGrid from a list of strings, one per row.
+
+    The top row is the highest y. '.' is free, '#' occupied, '?' unknown.
+    """
     height = len(rows)
     width = len(rows[0])
     assert all(len(r) == width for r in rows), "all rows must be equal width"
@@ -46,32 +51,42 @@ def make_grid(rows, resolution=1.0, origin=(0.0, 0.0)):
 
 def robot_at(x, y):
     pose = Pose()
-    # ROS message fields are strictly typed -- cast in case a caller
-    # passes an int (e.g. robot_at(0, 0)) rather than a float.
+    # ROS message fields are strictly typed, so cast in case a caller
+    # passes an int.
     pose.position.x = float(x)
     pose.position.y = float(y)
     return pose
 
 
+def goal_xy(candidate):
+    position = candidate.pose.pose.position
+    return position.x, position.y
+
+
+# A 7x7 map: unknown border ring around a 5x5 free room. The frontier is the
+# whole ring of free cells just inside the border, as at the start of a run.
+RING = [
+    "???????",
+    "?.....?",
+    "?.....?",
+    "?.....?",
+    "?.....?",
+    "?.....?",
+    "???????",
+]
+
+
 def test_rejects_tiny_frontier_cluster():
-    # A single free cell surrounded by walls except one unknown neighbour:
-    # only a 1-cell frontier, which should be rejected by the default
-    # min_cluster_size (8).
-    rows = [
-        "?##",
-        ".##",
-        "###",
-    ]
-    grid = make_grid(rows)
+    # One free cell with a single unknown neighbour: a 1-cell frontier,
+    # below the default min_cluster_size of 8.
+    grid = make_grid(["?##", ".##", "###"])
     selector = FrontierSelector(min_cluster_size=8)
 
     assert selector.find_clusters(grid) == []
-    assert selector.choose_goal(grid, robot_at(0, 0)) is None
+    assert selector.rank_candidates(grid, robot_at(0, 0)).candidates == []
 
 
 def test_finds_and_scores_a_real_frontier():
-    # A 5x5 free room with unknown space along the top edge -- a large,
-    # legitimate frontier that should be found and selected.
     rows = [
         "?????",
         ".....",
@@ -79,135 +94,241 @@ def test_finds_and_scores_a_real_frontier():
         ".....",
         ".....",
     ]
-    grid = make_grid(rows, resolution=1.0)
+    grid = make_grid(rows)
     selector = FrontierSelector(min_cluster_size=3)
 
     clusters = selector.find_clusters(grid)
     assert len(clusters) == 1
-    assert len(clusters[0]) == 5  # the whole row just below the unknown strip
+    assert len(clusters[0]) == 5
 
-    goal = selector.choose_goal(grid, robot_at(2.0, 4.0))
-    assert goal is not None
-    # Goal should sit roughly in the middle of the frontier row, near y=3.5m.
-    assert goal.pose.pose.position.y == pytest.approx(3.5, abs=0.5)
+    result = selector.rank_candidates(grid, robot_at(2.0, 0.5))
+    assert len(result.candidates) == 1
+    x, y = goal_xy(result.candidates[0])
+    assert y == pytest.approx(3.5)
+    assert x == pytest.approx(2.5)
 
 
 def test_orients_towards_unknown_area():
-    # Frontier is the bottom of the free area, with unknown space below it
-    # (negative y direction) -- the chosen yaw should point roughly "down".
+    # Unknown space lies below the free area (negative y), so the goal
+    # should face roughly -pi/2.
     rows = [
         ".....",
         ".....",
         "?????",
     ]
-    grid = make_grid(rows, resolution=1.0)
+    grid = make_grid(rows)
     selector = FrontierSelector(min_cluster_size=3)
 
-    goal = selector.choose_goal(grid, robot_at(2.0, 1.5))
-    assert goal is not None
+    result = selector.rank_candidates(grid, robot_at(2.0, 2.5))
+    assert result.candidates
 
-    qz = goal.pose.pose.orientation.z
-    qw = goal.pose.pose.orientation.w
-    yaw = 2.0 * math.atan2(qz, qw)
-    # Facing towards -y is yaw == -pi/2 (i.e. -90 degrees).
+    orientation = result.candidates[0].pose.pose.orientation
+    yaw = 2.0 * math.atan2(orientation.z, orientation.w)
     assert yaw == pytest.approx(-math.pi / 2, abs=0.2)
 
 
-def test_avoids_revisiting_recent_goal():
+def test_avoids_revisiting_visited_goal():
     rows = [
         "?????",
         ".....",
         ".....",
     ]
-    grid = make_grid(rows, resolution=1.0)
-    selector = FrontierSelector(min_cluster_size=3, revisit_radius=2.0)
+    grid = make_grid(rows)
+    # The radius is wider than the whole 5-cell frontier, so one visited
+    # goal covers all of it. (A narrower radius lets a wide frontier be
+    # visited again at other spots.)
+    selector = FrontierSelector(min_cluster_size=3, revisit_radius=2.5)
 
-    first = selector.choose_goal(grid, robot_at(2.0, 0.0))
-    assert first is not None
+    first = selector.rank_candidates(grid, robot_at(2.0, 0.0)).candidates
+    assert first
 
-    # Same map, same (only) frontier -- but it's now within revisit_radius
-    # of the goal we just chose, so it should be skipped.
-    second = selector.choose_goal(grid, robot_at(2.0, 0.0))
-    assert second is None
+    # Selection alone does not mark anything visited.
+    assert selector.rank_candidates(grid, robot_at(2.0, 0.0)).candidates
+
+    selector.mark_visited(*goal_xy(first[0]))
+    assert selector.rank_candidates(grid, robot_at(2.0, 0.0)).candidates == []
+
+    selector.clear_history()
+    assert selector.rank_candidates(grid, robot_at(2.0, 0.0)).candidates
 
 
 def test_exploration_complete_when_no_frontiers_left():
-    # Fully explored map: no unknown cells at all.
-    rows = [
-        ".....",
-        ".....",
-        ".....",
-    ]
-    grid = make_grid(rows)
+    grid = make_grid(["....."] * 3)
     selector = FrontierSelector()
 
     assert selector.find_clusters(grid) == []
-    assert selector.choose_goal(grid, robot_at(0.0, 0.0)) is None
-
-
-def test_nudges_goal_away_from_costmap_obstacle():
-    rows = [
-        "?????",
-        ".....",
-        ".....",
-    ]
-    # Use a cell size equal to the nudge step (0.3m) so a single nudge
-    # reliably lands in the next cell over, rather than staying inside
-    # the same (larger) blocked cell.
-    grid = make_grid(rows, resolution=0.3)
-    selector = FrontierSelector(min_cluster_size=3)
-
-    # A costmap is the same wire format as the map (0-100 cost, -1 unknown),
-    # so we can build one with make_grid too. Here '#' (=100) sits right on
-    # the frontier's centroid cell (2, 1) -- too close to an obstacle.
-    costmap = make_grid(
-        [
-            ".....",
-            "..#..",
-            ".....",
-        ],
-        resolution=0.3,
-    )
-
-    goal = selector.choose_goal(grid, robot_at(0.0, 0.0), global_costmap=costmap)
-
-    assert goal is not None
-    x, y = goal.pose.pose.position.x, goal.pose.pose.position.y
-    assert (x, y) != pytest.approx((0.75, 0.45))  # nudged away from the blocked cell centre
-
-
-def test_returns_none_when_only_frontier_is_unsafe():
-    rows = [
-        "?????",
-        ".....",
-        ".....",
-    ]
-    grid = make_grid(rows)
-    selector = FrontierSelector(min_cluster_size=3)
-
-    # Whole costmap is high-cost -- nowhere is safe to nudge to.
-    costmap = make_grid(["#####", "#####", "#####"])
-
-    goal = selector.choose_goal(grid, robot_at(2.0, 0.0), global_costmap=costmap)
-    assert goal is None
+    result = selector.rank_candidates(grid, robot_at(0.0, 0.0))
+    assert result.candidates == []
+    assert result.blocked_clusters == 0
 
 
 def test_prefers_bigger_closer_frontier():
-    # Two frontiers: a small one right next to the robot, and a bigger one
-    # further away. With default weights the bigger one should still win
-    # if it's not too much further -- tune distance_weight/size_weight to
-    # see this trade-off shift.
     rows = [
         "?..??????",
         "....?????",
         ".........",
         ".........",
     ]
-    grid = make_grid(rows, resolution=1.0)
-    selector = FrontierSelector(min_cluster_size=2, distance_weight=1.0, size_weight=0.5)
+    grid = make_grid(rows)
+    selector = FrontierSelector(
+        min_cluster_size=2, distance_weight=1.0, size_weight=0.5
+    )
 
-    goal = selector.choose_goal(grid, robot_at(1.0, 0.0))
-    assert goal is not None
-    # The big frontier is on the right-hand side (higher x); expect the
-    # selector to reach across for it given the strong size_weight here.
-    assert goal.pose.pose.position.x > 3.0
+    result = selector.rank_candidates(grid, robot_at(1.0, 0.0))
+    assert result.candidates
+    # The big frontier is on the right; the strong size weight makes the
+    # selector reach across for it.
+    assert goal_xy(result.candidates[0])[0] > 3.0
+
+
+def test_goal_is_never_closer_than_min_goal_distance():
+    grid = make_grid(RING)
+    selector = FrontierSelector(min_cluster_size=3, min_goal_distance=1.5)
+    robot = robot_at(3.5, 3.5)    # standing in the middle of the ring
+
+    result = selector.rank_candidates(grid, robot)
+
+    assert len(result.candidates) == 1
+    x, y = goal_xy(result.candidates[0])
+    assert math.hypot(x - 3.5, y - 3.5) >= 1.5
+
+
+def test_drops_cluster_when_every_cell_is_too_close():
+    grid = make_grid(RING)
+    selector = FrontierSelector(min_cluster_size=3, min_goal_distance=10.0)
+
+    assert selector.rank_candidates(grid, robot_at(3.5, 3.5)).candidates == []
+
+
+def test_goal_lies_on_a_frontier_cell_not_the_centroid():
+    # The centroid of a ring is its (free, non-frontier) middle.
+    grid = make_grid(RING)
+    selector = FrontierSelector(min_cluster_size=3, min_goal_distance=0.0)
+
+    result = selector.rank_candidates(grid, robot_at(3.5, 3.5))
+
+    x, y = goal_xy(result.candidates[0])
+    assert (int(x), int(y)) in result.clusters[0]
+    assert (int(x), int(y)) != (3, 3)
+
+
+def test_costmap_obstacle_moves_goal_to_another_frontier_cell():
+    rows = [
+        "?????",
+        ".....",
+        ".....",
+    ]
+    grid = make_grid(rows)
+    selector = FrontierSelector(min_cluster_size=3)
+    # The centroid cell (2, 1) is blocked in the costmap.
+    costmap = make_grid(
+        [
+            ".....",
+            "..#..",
+            ".....",
+        ]
+    )
+
+    clear = selector.rank_candidates(grid, robot_at(2.0, 0.0))
+    blocked = selector.rank_candidates(
+        grid, robot_at(2.0, 0.0), [CostmapLayer(costmap)]
+    )
+
+    assert goal_xy(clear.candidates[0]) == pytest.approx((2.5, 1.5))
+    assert blocked.candidates
+    assert goal_xy(blocked.candidates[0]) != pytest.approx((2.5, 1.5))
+
+
+def test_no_goal_when_whole_costmap_is_unsafe():
+    grid = make_grid(["?????", ".....", "....."])
+    selector = FrontierSelector(min_cluster_size=3)
+    costmap = make_grid(["#####", "#####", "#####"])
+
+    result = selector.rank_candidates(
+        grid, robot_at(2.0, 0.0), [CostmapLayer(costmap)]
+    )
+
+    assert result.candidates == []
+
+
+def test_unknown_costmap_cell_is_unsafe():
+    grid = make_grid(["?????", ".....", "....."])
+    selector = FrontierSelector(min_cluster_size=3)
+    costmap = make_grid(["?????", "?????", "?????"])
+
+    result = selector.rank_candidates(
+        grid, robot_at(2.0, 0.0), [CostmapLayer(costmap)]
+    )
+
+    assert result.candidates == []
+
+
+def test_out_of_bounds_is_unsafe_for_global_but_not_for_local_costmap():
+    grid = make_grid(["?????", ".....", "....."])
+    selector = FrontierSelector(min_cluster_size=3)
+    # A costmap that covers none of the frontier, like a rolling local
+    # costmap around a robot that is far away.
+    far_costmap = make_grid(["...", "..."], origin=(50.0, 50.0))
+
+    strict = selector.rank_candidates(
+        grid, robot_at(2.0, 0.0), [CostmapLayer(far_costmap, strict_bounds=True)]
+    )
+    lenient = selector.rank_candidates(
+        grid, robot_at(2.0, 0.0), [CostmapLayer(far_costmap, strict_bounds=False)]
+    )
+
+    assert strict.candidates == []
+    assert lenient.candidates
+
+
+def test_costmap_layer_applies_its_frame_transform():
+    grid = make_grid(["?????", ".....", "....."])
+    selector = FrontierSelector(min_cluster_size=3)
+    # Costmap frame is shifted by +10 m in x; its obstacle sits at the
+    # shifted position of the centroid cell (2.5, 1.5) -> (12.5, 1.5).
+    local = make_grid(
+        [
+            "...............",
+            "............#..",
+            "...............",
+        ],
+        origin=(0.0, 0.0),
+    )
+    layer = CostmapLayer(local, lambda x, y: (x + 10.0, y), strict_bounds=False)
+
+    result = selector.rank_candidates(grid, robot_at(2.0, 0.0), [layer])
+
+    assert goal_xy(result.candidates[0]) != pytest.approx((2.5, 1.5))
+
+
+def test_blacklisted_cells_are_skipped():
+    grid = make_grid(["?????", ".....", "....."])
+    selector = FrontierSelector(min_cluster_size=3)
+
+    result = selector.rank_candidates(
+        grid, robot_at(2.0, 0.0), is_blocked=lambda x, y: x < 2.0
+    )
+
+    assert result.candidates
+    assert goal_xy(result.candidates[0])[0] >= 2.0
+
+
+def test_fully_blacklisted_frontier_is_reported_as_blocked():
+    grid = make_grid(["?????", ".....", "....."])
+    selector = FrontierSelector(min_cluster_size=3)
+
+    result = selector.rank_candidates(
+        grid, robot_at(2.0, 0.0), is_blocked=lambda x, y: True
+    )
+
+    assert result.candidates == []
+    assert result.blocked_clusters == 1
+
+
+def test_frontier_near_finds_and_misses_frontiers():
+    grid = make_grid(["?????", ".....", "....."])
+
+    assert frontier_near(grid, 2.5, 1.5, 0.5)
+    assert frontier_near(grid, 2.5, 0.5, 1.5)
+    assert not frontier_near(grid, 2.5, 0.5, 0.4)
+    assert not frontier_near(grid, 100.0, 100.0, 1.0)

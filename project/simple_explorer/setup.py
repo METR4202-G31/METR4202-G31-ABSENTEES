@@ -29,18 +29,26 @@ setup(
             ),
             glob("launch/*.launch.py"),
         ),
+        (
+            os.path.join(
+                "share",
+                package_name,
+                "config",
+            ),
+            glob("config/*.yaml"),
+        ),
     ],
     install_requires=[
         "setuptools",
     ],
     zip_safe=True,
     maintainer="jleib",
-    description="Simple frontier exploration demonstration",
+    description="Frontier exploration goal selection for the navigation supervisor",
     license="TODO",
     entry_points={
         "console_scripts": [
-            "simple_frontier_explorer = "
-            "simple_explorer.simple_frontier_explorer:main",
+            "frontier_explorer = "
+            "simple_explorer.frontier_explorer_node:main",
         ],
     },
 )

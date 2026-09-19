@@ -1,94 +1,99 @@
-# Simple Frontier Explorer
+# simple_explorer
 
-A basic ROS 2 frontier-exploration demonstration using SLAM Toolbox and Nav2.
+Frontier exploration for the TurtleBot3. The `frontier_explorer` node decides
+where to explore next and hands each goal to the navigation supervisor. It does
+not drive Nav2 itself.
 
-The package:
+## How it works
 
-* Reads the occupancy grid produced by SLAM.
-* Detects frontier cells between known free space and unknown space.
-* Groups connected frontier cells.
-* Selects a frontier goal.
-* Sends the goal to Nav2 for navigation.
-* Repeats as the map expands.
+1. Find frontier cells (free cells next to unknown space) in the SLAM `/map` and
+   group them into clusters. Clusters under `min_cluster_size` cells are noise.
+2. For each cluster pick one goal cell: a free frontier cell near the cluster
+   centroid that is at least `min_goal_distance` from the robot, safe in the
+   global and local costmaps, not blacklisted, and not near a goal already visited.
+3. Rank clusters (closer and bigger is better) and, if `precheck_path` is set, ask
+   the Nav2 planner (`compute_path_to_pose`) whether a path exists. A goal with no
+   path is blacklisted and published on `/explore/blacklist`.
+4. Publish the goal on `/explore` and send it to the supervisor's `ManagedNavigate`
+   action. One outcome comes back per goal.
+5. If the frontier disappears after a map update the goal is cancelled and a new
+   one is chosen.
+6. When no cluster yields a goal for a few cycles the node publishes a `DONE_*`
+   status and stops sending goals.
 
-## Build
+## Blacklist
 
-Place the package inside the `src` directory of a ROS 2 workspace, then run:
+The explorer owns the blacklist policy. It merges two sources:
 
-```bash id="c5i5m6"
-colcon build --packages-select simple_explorer
+* goals it rejected itself (no path) or that `ManagedNavigate` reported as failed;
+* the supervisor's `/failed_regions` record (regions with at least
+  `min_failure_count` failures).
+
+`/failed_regions` is only a record of failures; whether a region blocks a goal is
+decided here.
+
+## Interfaces
+
+| Direction | Topic / action | Type | Notes |
+|---|---|---|---|
+| sub | `/map` | `nav_msgs/OccupancyGrid` | SLAM map |
+| sub | `/global_costmap/costmap`, `/local_costmap/costmap` | `nav_msgs/OccupancyGrid` | local costmap is in `odom`, converted via tf |
+| sub | `/failed_regions` | `navigation_interfaces/FailedRegionArray` | from the supervisor |
+| sub | `/explore/resume` | `std_msgs/Bool` | from mission control: `false` stops (cancels the active goal), `true` resumes; resuming after `DONE_*` retries blacklisted goals |
+| pub | `/explore` | `geometry_msgs/PoseStamped` | every goal sent, just a pose in `map` |
+| pub | `/explore/blacklist` | `geometry_msgs/PoseStamped` | every goal the explorer rejected itself |
+| pub | `/explore/status` | `std_msgs/String` | `WAITING`, `EXPLORING`, `STOPPED`, `DONE_NO_FRONTIERS`, `DONE_BLACKLISTED_REMAIN` (transient-local) |
+| pub | `/explore/frontiers` | `visualization_msgs/MarkerArray` | frontier cells, next goal, blacklist (for RViz) |
+| action client | `managed_navigate` | `navigation_interfaces/ManagedNavigate` | needs the supervisor's action server |
+| action client | `compute_path_to_pose` | `nav2_msgs/ComputePathToPose` | optional goal pre-check |
+
+`DONE_NO_FRONTIERS` means the map has no reachable frontier left.
+`DONE_BLACKLISTED_REMAIN` means only blacklisted frontiers are left, so mission
+control may want to resume for a retry pass.
+
+The supervisor must act on the `ManagedNavigate` action only. `/explore` is
+informational; if the supervisor also navigated from it, every goal would be sent twice.
+
+Parameters live in `config/frontier_explorer.yaml`.
+
+## Build and run
+
+```bash
+colcon build --symlink-install --packages-select simple_explorer
 source install/setup.bash
+
+# Gazebo + SLAM + Nav2 + RViz + explorer (world:=, x_pose:=, y_pose:= optional)
+TURTLEBOT3_MODEL=waffle_pi ros2 launch simple_explorer exploration_demo.launch.py
+
+# SLAM + Nav2 + RViz + explorer, when the simulator is already running
+ros2 launch simple_explorer explore.launch.py
 ```
 
-Dependencies can be installed with:
+Until a `ManagedNavigate` server is running the explorer stays in `WAITING`.
 
-```bash id="64bh1p"
-rosdep install --from-paths src --ignore-src -r -y
+Stop or resume from the command line:
+
+```bash
+ros2 topic pub --once /explore/resume std_msgs/msg/Bool "{data: false}"
+ros2 topic pub --once /explore/resume std_msgs/msg/Bool "{data: true}"
 ```
 
-## Run
+## Tests
 
-Launch the demonstration with:
-
-```bash id="4441vx"
-ros2 launch simple_explorer exploration_demo.launch.py
+```bash
+colcon test --packages-select simple_explorer && colcon test-result --verbose
+python -m pytest project/simple_explorer/test   # needs the ROS environment sourced
 ```
 
-A specific Gazebo world can be supplied with:
+`frontier_selector.py`, `blacklist.py` and `goal_outcome.py` are ROS-node-free
+and are covered by plain pytest; the node itself is a thin wrapper around them.
 
-```bash id="l4mvnq"
-ros2 launch simple_explorer exploration_demo.launch.py \
-    world:=/path/to/world.world
-```
+## Known limitations
 
-The robot start position can also be changed:
-
-```bash id="hqzlcf"
-ros2 launch simple_explorer exploration_demo.launch.py \
-    x_pose:=0.0 \
-    y_pose:=0.0
-```
-
-## Exploration Flow
-
-```text id="6w4qh7"
-LiDAR
-  ↓
-SLAM
-  ↓
-Occupancy Map
-  ↓
-Frontier Detection
-  ↓
-Frontier Selection
-  ↓
-Nav2 Goal
-  ↓
-Robot Navigation
-  ↓
-Updated Map
-  ↓
-Repeat
-```
-
-## Main ROS 2 Interfaces
-
-* `/scan` — LiDAR data
-* `/odom` — robot odometry
-* `/map` — occupancy grid
-* `/tf` and `/tf_static` — coordinate transforms
-* `/navigate_to_pose` — Nav2 navigation action
-* `/cmd_vel` — robot velocity commands
-
-## Known Limitations
-
-This is a simple proof-of-concept rather than a complete exploration system.
-
-Current limitations include:
-
-* Basic frontier-selection heuristic.
-* No explicit obstacle-clearance scoring.
-* No pre-check of candidate goals using Nav2 path planning.
-* Simple handling of previous and failed goals.
-* Approximate exploration-completion detection.
-* No optimisation of exploration time or travelled distance.
+* Frontier goals are cells on the frontier, so they can sit close to walls; the
+  costmap check keeps them out of high-cost areas but not out of tight gaps.
+* A path from the planner does not guarantee the controller can follow it.
+* Wide frontiers can be revisited at other spots once a goal there is done,
+  because visited goals only cover `revisit_radius`.
+* Frontier detection runs over the whole map each cycle (numpy, well under a
+  second for 800x800 cells).

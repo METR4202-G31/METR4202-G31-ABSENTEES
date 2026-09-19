@@ -1,0 +1,33 @@
+frontier_explorer:
+  ros__parameters:
+    # Frontier detection and scoring
+    min_cluster_size: 8          # cells; smaller frontiers are noise
+    min_goal_distance: 0.6       # m; never pick a goal closer to the robot than this
+    revisit_radius: 0.5          # m; do not re-pick goals near recently visited ones
+    max_history: 20
+    distance_weight: 1.0
+    size_weight: 0.02
+    cost_limit: 75               # Nav2 cost above which a goal is too close to an obstacle
+
+    # Blacklist
+    blacklist_radius: 0.5        # m; circle around goals the explorer rejects itself
+    min_failure_count: 1         # supervisor failed regions with fewer failures are ignored
+
+    # Frames
+    map_frame: map
+    robot_frame: base_footprint
+
+    # Nav2 / supervisor interfaces
+    managed_navigate_action: managed_navigate
+    compute_path_action: compute_path_to_pose
+    precheck_path: true          # ask the planner for a path before sending a goal
+    max_prechecks: 5             # candidates checked per selection cycle
+    precheck_timeout: 3.0        # s
+
+    # Loop behaviour
+    loop_rate_hz: 2.0
+    settle_time: 1.0             # s pause after each goal so the map can update
+    empty_cycles_to_finish: 3    # consecutive empty selections before reporting DONE_*
+    validity_check_period: 2.0   # s between "is the frontier still there" checks
+    frontier_gone_radius: 1.0    # m
+    max_internal_retries: 2
