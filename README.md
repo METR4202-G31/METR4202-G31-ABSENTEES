@@ -188,9 +188,6 @@ Mission Control publishes detected marker positions on:
 
 which can be displayed in RViz using a `Marker` display.
 
-RViz is only used for visualisation. The exploration, navigation, SLAM and
-perception nodes can continue running if RViz is closed.
-
 # Packages
 
 The project is split into several ROS 2 packages in the `project/` directory.
