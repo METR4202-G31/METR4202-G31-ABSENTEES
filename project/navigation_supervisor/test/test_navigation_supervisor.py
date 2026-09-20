@@ -270,10 +270,10 @@ def test_successful_navigation_does_not_record_failed_region(
     assert len(supervisor._failed_region_manager.get_regions()) == 0
 
 
-def test_goal_inside_failed_region_is_rejected(
+def test_goal_inside_failed_region_is_still_accepted(
     supervisor,
 ):
-    """Reject a goal that lies inside an existing failed region."""
+    """Allow navigation to a location with previous failure history."""
     supervisor._failed_region_manager.record_failure(
         x=1.0,
         y=2.0,
@@ -283,6 +283,6 @@ def test_goal_inside_failed_region_is_rejected(
 
     accepted = supervisor.submit_goal(make_goal(x=1.1, y=2.0))
 
-    assert accepted is False
-    assert supervisor.last_outcome == NavigationOutcome.BLACKLISTED
+    assert accepted is True
+    assert supervisor.last_outcome is None
     assert supervisor.state == NavigationState.IDLE

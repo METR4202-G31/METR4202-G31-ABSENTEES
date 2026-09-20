@@ -3,19 +3,22 @@
 import copy
 import math
 from typing import Optional
-
 import rclpy
 
 from geometry_msgs.msg import PoseStamped
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 
+from navigation_interfaces.action import ManagedNavigate
 from navigation_interfaces.msg import FailedRegion, FailedRegionArray
 
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.qos import (
     DurabilityPolicy,
     QoSProfile,
     ReliabilityPolicy,
 )
+from rclpy.task import Future
 
 from .failed_region_manager import FailedRegionManager
 from .navigation_types import (
@@ -26,7 +29,7 @@ from .navigation_types import (
 
 
 class NavigationSupervisor(BasicNavigator):
-    """Supervise exectuion of externally supplied navigation goals."""
+    """Supervise execution of externally supplied navigation goals."""
 
     def __init__(self) -> None:
         """Initialise the Navigation Supervisor."""
@@ -47,16 +50,32 @@ class NavigationSupervisor(BasicNavigator):
             .string_value
         )
 
-        self.declare_parameter("goal_topic", "/navigation_goal")
-        self._goal_topic = (
-            self.get_parameter("goal_topic").get_parameter_value().string_value
+        self._action_goal_reserved = False
+        self._active_action_goal_handle = None
+        self._action_result_future: Optional[Future] = None
+        self._action_cancel_pending = False
+        self._failed_region_recorded = False
+
+        self.declare_parameter(
+            "managed_navigate_action",
+            "managed_navigate",
+        )
+        self._managed_navigate_action = (
+            self.get_parameter("managed_navigate_action")
+            .get_parameter_value()
+            .string_value
         )
 
-        self._goal_subscription = self.create_subscription(
-            PoseStamped,
-            self._goal_topic,
-            self._goal_callback,
-            10,
+        self._action_callback_group = ReentrantCallbackGroup()
+
+        self._action_server = ActionServer(
+            self,
+            ManagedNavigate,
+            self._managed_navigate_action,
+            execute_callback=self._execute_managed_navigation,
+            goal_callback=self._managed_goal_callback,
+            cancel_callback=self._managed_cancel_callback,
+            callback_group=self._action_callback_group,
         )
 
         self.declare_parameter("failed_region_radius", 0.30)
@@ -91,8 +110,8 @@ class NavigationSupervisor(BasicNavigator):
         )
 
         self.get_logger().info(
-            f"Navigation Supervisor initialised. "
-            f"Listening for goals on '{self._goal_topic}'."
+            "Navigation Supervisor initialised. "
+            f"ManagedNavigate action: '{self._managed_navigate_action}'."
         )
 
         self._publish_failed_regions()
@@ -110,8 +129,6 @@ class NavigationSupervisor(BasicNavigator):
     def submit_goal(self, goal: PoseStamped) -> bool:
         """
         Validate and queue a goal for navigation.
-
-        The supervisor does not depend on where the goal comes from
 
         Returns True if the goal was accepted by the supervisor.
         """
@@ -133,20 +150,6 @@ class NavigationSupervisor(BasicNavigator):
             self._transition_to(NavigationState.IDLE)
             return False
 
-        blocked_region = self._failed_region_manager.find_blocking_region(
-            validated_goal.pose.position.x,
-            validated_goal.pose.position.y,
-        )
-
-        if blocked_region is not None:
-            self.get_logger().warn(
-                "Rejected goal because it lies inside failed region "
-                f"{blocked_region.region_id}."
-            )
-            self._last_outcome = NavigationOutcome.BLACKLISTED
-            self._transition_to(NavigationState.IDLE)
-            return False
-
         self._pending_goal = validated_goal
         self._last_outcome = None
 
@@ -165,6 +168,14 @@ class NavigationSupervisor(BasicNavigator):
 
         Returns a NavigationOutcome only when an attempt finishes.
         """
+        # Process action cancellation outside the ROS action callback.
+        if self._action_cancel_pending:
+            self._action_cancel_pending = False
+
+            if self.cancel_navigation():
+                if self._state == NavigationState.IDLE:
+                    return NavigationOutcome.CANCELED
+
         if (
             self._state == NavigationState.IDLE
             and self._pending_goal is not None
@@ -199,7 +210,7 @@ class NavigationSupervisor(BasicNavigator):
             outcome = NavigationOutcome.CANCELED
 
         elif result == TaskResult.FAILED:
-            self._record_current_goal_failure()
+            self._failed_region_recorded = self._record_current_goal_failure()
             outcome = NavigationOutcome.NAVIGATION_FAILED
 
         else:
@@ -215,7 +226,11 @@ class NavigationSupervisor(BasicNavigator):
         ):
             self._pending_goal = None
             self._last_outcome = NavigationOutcome.CANCELED
+
             self.get_logger().info("Pending navigation goal canceled.")
+
+            self._complete_action_outcome(NavigationOutcome.CANCELED)
+
             return True
 
         if self._state != NavigationState.NAVIGATING:
@@ -226,6 +241,7 @@ class NavigationSupervisor(BasicNavigator):
 
         try:
             self.cancelTask()
+
         except Exception as exc:
             self.get_logger().error(
                 f"Failed to request Nav2 cancellation: {exc}"
@@ -235,7 +251,83 @@ class NavigationSupervisor(BasicNavigator):
 
         return True
 
-    def _start_pending_goal(self) -> Optional[NavigationOutcome]:
+    def _managed_goal_callback(
+        self,
+        goal_request: ManagedNavigate.Goal,
+    ) -> GoalResponse:
+        """Accept one ManagedNavigate goal at a time."""
+        # Pose validation occurs after acceptance so INVALID_GOAL can be returned.
+        if (
+            self._action_goal_reserved
+            or self._state != NavigationState.IDLE
+            or self._pending_goal is not None
+        ):
+            self.get_logger().warn(
+                "Rejecting ManagedNavigate goal because navigation is busy."
+            )
+            return GoalResponse.REJECT
+
+        self._action_goal_reserved = True
+        self._action_cancel_pending = False
+
+        self.get_logger().info("Accepted ManagedNavigate action goal.")
+
+        return GoalResponse.ACCEPT
+
+    def _managed_cancel_callback(
+        self,
+        goal_handle,
+    ) -> CancelResponse:
+        """Accept cancellation of the active ManagedNavigate request."""
+        if not self._action_goal_reserved:
+            return CancelResponse.REJECT
+
+        self.get_logger().info("ManagedNavigate cancellation requested.")
+
+        # update() performs the actual Nav2 cancellation outside this callback.
+        self._action_cancel_pending = True
+
+        return CancelResponse.ACCEPT
+
+    async def _execute_managed_navigation(
+        self,
+        goal_handle,
+    ) -> ManagedNavigate.Result:
+        """Execute a ManagedNavigate request through the supervisor."""
+        self._active_action_goal_handle = goal_handle
+        self._action_result_future = Future()
+        self._failed_region_recorded = False
+
+        # Handle cancellation received immediately after action acceptance.
+        if goal_handle.is_cancel_requested:
+            return self._finish_managed_action(
+                goal_handle,
+                NavigationOutcome.CANCELED,
+            )
+
+        accepted = self.submit_goal(goal_handle.request.target_pose)
+
+        if not accepted:
+            outcome = self._last_outcome
+
+            if outcome is None:
+                outcome = NavigationOutcome.INTERNAL_ERROR
+
+            return self._finish_managed_action(
+                goal_handle,
+                outcome,
+            )
+
+        outcome = await self._action_result_future
+
+        return self._finish_managed_action(
+            goal_handle,
+            outcome,
+        )
+
+    def _start_pending_goal(
+        self,
+    ) -> Optional[NavigationOutcome]:
         """Send the pending goal to Nav2."""
         goal = self._pending_goal
 
@@ -246,7 +338,6 @@ class NavigationSupervisor(BasicNavigator):
         self._current_goal = goal
         self._cancel_requested = False
 
-        # Refresh the timestamp immediately before sending the pose.
         goal.header.stamp = self.get_clock().now().to_msg()
 
         self.get_logger().info(
@@ -269,6 +360,94 @@ class NavigationSupervisor(BasicNavigator):
         self._transition_to(NavigationState.NAVIGATING)
         return None
 
+    def _finish_navigation(
+        self,
+        outcome: NavigationOutcome,
+    ) -> NavigationOutcome:
+        """Finish the current navigation attempt and return to idle."""
+        self._last_outcome = outcome
+
+        if outcome == NavigationOutcome.SUCCEEDED:
+            self.get_logger().info("Navigation succeeded.")
+
+        elif outcome == NavigationOutcome.CANCELED:
+            self.get_logger().info("Navigation canceled.")
+
+        else:
+            self.get_logger().warn(
+                f"Navigation finished with outcome: {outcome.name}."
+            )
+
+        self._current_goal = None
+        self._cancel_requested = False
+
+        self._transition_to(NavigationState.IDLE)
+        self._complete_action_outcome(outcome)
+
+        return outcome
+
+    def _complete_action_outcome(
+        self,
+        outcome: NavigationOutcome,
+    ) -> None:
+        """Wake the ManagedNavigate callback with a final outcome."""
+        if (
+            self._action_result_future is not None
+            and not self._action_result_future.done()
+        ):
+            self._action_result_future.set_result(outcome)
+
+    def _finish_managed_action(
+        self,
+        goal_handle,
+        outcome: NavigationOutcome,
+    ) -> ManagedNavigate.Result:
+        """Convert an internal outcome into a ManagedNavigate result."""
+        result_codes = {
+            NavigationOutcome.SUCCEEDED: ManagedNavigate.Result.SUCCEEDED,
+            NavigationOutcome.BLACKLISTED: ManagedNavigate.Result.BLACKLISTED,
+            NavigationOutcome.PLANNING_FAILED: ManagedNavigate.Result.PLANNING_FAILED,
+            NavigationOutcome.NAVIGATION_FAILED: ManagedNavigate.Result.NAVIGATION_FAILED,
+            NavigationOutcome.STUCK: ManagedNavigate.Result.STUCK,
+            NavigationOutcome.CANCELED: ManagedNavigate.Result.CANCELED,
+            NavigationOutcome.INVALID_GOAL: ManagedNavigate.Result.INVALID_GOAL,
+            NavigationOutcome.INTERNAL_ERROR: ManagedNavigate.Result.INTERNAL_ERROR,
+        }
+
+        messages = {
+            NavigationOutcome.SUCCEEDED: "Navigation succeeded.",
+            NavigationOutcome.BLACKLISTED: "Navigation goal was blacklisted.",
+            NavigationOutcome.PLANNING_FAILED: "Navigation planning failed.",
+            NavigationOutcome.NAVIGATION_FAILED: "Nav2 navigation failed.",
+            NavigationOutcome.STUCK: "Robot became stuck during navigation.",
+            NavigationOutcome.CANCELED: "Navigation was canceled.",
+            NavigationOutcome.INVALID_GOAL: "Navigation goal was invalid.",
+            NavigationOutcome.INTERNAL_ERROR: (
+                "Navigation Supervisor encountered an internal error."
+            ),
+        }
+
+        result = ManagedNavigate.Result()
+        result.result_code = result_codes[outcome]
+        result.message = messages[outcome]
+        result.failed_region_recorded = self._failed_region_recorded
+
+        if outcome == NavigationOutcome.SUCCEEDED:
+            goal_handle.succeed()
+
+        elif outcome == NavigationOutcome.CANCELED:
+            goal_handle.canceled()
+
+        else:
+            goal_handle.abort()
+
+        self._active_action_goal_handle = None
+        self._action_result_future = None
+        self._action_goal_reserved = False
+        self._action_cancel_pending = False
+
+        return result
+
     def _validate_goal(
         self,
         goal: PoseStamped,
@@ -281,7 +460,7 @@ class NavigationSupervisor(BasicNavigator):
         if goal.header.frame_id != self._global_frame:
             self.get_logger().warn(
                 f"Goal frame '{goal.header.frame_id}' does not match "
-                f"configured global frame '{self._global_frame}',"
+                f"configured global frame '{self._global_frame}'."
             )
             return None
 
@@ -327,31 +506,6 @@ class NavigationSupervisor(BasicNavigator):
 
         return validated_goal
 
-    def _finish_navigation(
-        self,
-        outcome: NavigationOutcome,
-    ) -> NavigationOutcome:
-        """Finish the current navigation attempt and return to idle."""
-        self._last_outcome = outcome
-
-        if outcome == NavigationOutcome.SUCCEEDED:
-            self.get_logger().info("Navigation succeeded.")
-
-        elif outcome == NavigationOutcome.CANCELED:
-            self.get_logger().info("Navigation canceled.")
-
-        else:
-            self.get_logger().warn(
-                f"Navigation finished with outcome: {outcome.name}."
-            )
-
-        self._current_goal = None
-        self._cancel_requested = False
-
-        self._transition_to(NavigationState.IDLE)
-
-        return outcome
-
     def _transition_to(
         self,
         new_state: NavigationState,
@@ -366,20 +520,15 @@ class NavigationSupervisor(BasicNavigator):
 
         self._state = new_state
 
-    def _goal_callback(self, msg: PoseStamped) -> None:
-        """Submit an incoming goal pose for navigation."""
-        self.submit_goal(msg)
-
-    def _record_current_goal_failure(self) -> None:
+    def _record_current_goal_failure(self) -> bool:
         """Record the current goal as a failed navigation region."""
         if self._current_goal is None:
             self.get_logger().warn(
                 "Navigation failed but no current goal was available."
             )
-            return
+            return False
 
         position = self._current_goal.pose.position
-
         now_seconds = self.get_clock().now().nanoseconds / 1_000_000_000.0
 
         region = self._failed_region_manager.record_failure(
@@ -397,8 +546,10 @@ class NavigationSupervisor(BasicNavigator):
 
         self._publish_failed_regions()
 
+        return True
+
     def _publish_failed_regions(self) -> None:
-        """Publish the complete current failed-region blacklist."""
+        """Publish the complete current failed-region history."""
         msg = FailedRegionArray()
 
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -418,10 +569,13 @@ class NavigationSupervisor(BasicNavigator):
 
             if record.last_failure_reason == FailureReason.NAV_ABORTED:
                 region_msg.last_failure_reason = FailedRegion.NAVIGATION_FAILED
+
             elif record.last_failure_reason == FailureReason.NO_PROGRESS:
                 region_msg.last_failure_reason = FailedRegion.STUCK
+
             elif record.last_failure_reason == FailureReason.NAV_TIMEOUT:
                 region_msg.last_failure_reason = FailedRegion.NAVIGATION_TIMEOUT
+
             else:
                 region_msg.last_failure_reason = FailedRegion.PLANNING_FAILED
 
@@ -445,6 +599,11 @@ class NavigationSupervisor(BasicNavigator):
 
         self._failed_regions_publisher.publish(msg)
 
+    def destroy_node(self) -> None:
+        """Destroy the action server and Navigation Supervisor."""
+        self._action_server.destroy()
+        super().destroy_node()
+
 
 def main(args=None) -> None:
     """Run the Navigation Supervisor node."""
@@ -454,14 +613,12 @@ def main(args=None) -> None:
 
     try:
         while rclpy.ok():
-            # Process incoming ROS events first.
+            # Process ROS callbacks before advancing the supervisor state machine.
             rclpy.spin_once(
                 supervisor,
                 timeout_sec=0.1,
             )
 
-            # Then allow the supervisor to interact with Simple Commander
-            # outside a ROS subscription callback.
             supervisor.update()
 
     except KeyboardInterrupt:
