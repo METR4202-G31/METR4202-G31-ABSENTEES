@@ -28,6 +28,9 @@ setup(
         ],
     },
     entry_points={
-        "console_scripts": [],
+        "console_scripts": [
+            "navigation_supervisor = "
+            "navigation_supervisor.navigation_supervisor:main",
+        ],
     },
 )
