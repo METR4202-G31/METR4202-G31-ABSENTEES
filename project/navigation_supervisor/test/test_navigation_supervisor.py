@@ -1,10 +1,14 @@
 """Unit tests for the Navigation Supervisor."""
 
-import rclpy
+import asyncio
+
 import pytest
+import rclpy
 
 from geometry_msgs.msg import PoseStamped
 from nav2_simple_commander.robot_navigator import TaskResult
+from navigation_interfaces.action import ManagedNavigate
+from rclpy.action import CancelResponse, GoalResponse
 
 from navigation_supervisor.navigation_supervisor import NavigationSupervisor
 from navigation_supervisor.navigation_types import (
@@ -12,6 +16,34 @@ from navigation_supervisor.navigation_types import (
     NavigationOutcome,
     NavigationState,
 )
+
+
+class FakeManagedGoalHandle:
+    """Provide the minimal goal-handle behaviour needed by action tests."""
+
+    def __init__(
+        self,
+        target_pose: PoseStamped,
+        cancel_requested: bool = False,
+    ) -> None:
+        """Create a fake ManagedNavigate goal handle."""
+        self.request = ManagedNavigate.Goal()
+        self.request.target_pose = target_pose
+
+        self.is_cancel_requested = cancel_requested
+        self.terminal_state = None
+
+    def succeed(self) -> None:
+        """Record successful action completion."""
+        self.terminal_state = "succeeded"
+
+    def abort(self) -> None:
+        """Record aborted action completion."""
+        self.terminal_state = "aborted"
+
+    def canceled(self) -> None:
+        """Record canceled action completion."""
+        self.terminal_state = "canceled"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -286,3 +318,184 @@ def test_goal_inside_failed_region_is_still_accepted(
     assert accepted is True
     assert supervisor.last_outcome is None
     assert supervisor.state == NavigationState.IDLE
+
+
+def test_managed_goal_is_accepted_when_available(
+    supervisor,
+):
+    """Accept a ManagedNavigate request while the supervisor is available."""
+    request = ManagedNavigate.Goal()
+    request.target_pose = make_goal()
+
+    response = supervisor._managed_goal_callback(request)
+
+    assert response == GoalResponse.ACCEPT
+    assert supervisor._action_goal_reserved is True
+
+
+def test_second_managed_goal_is_rejected_while_reserved(
+    supervisor,
+):
+    """Reject another ManagedNavigate request while one is reserved."""
+    request = ManagedNavigate.Goal()
+    request.target_pose = make_goal()
+
+    first_response = supervisor._managed_goal_callback(request)
+    second_response = supervisor._managed_goal_callback(request)
+
+    assert first_response == GoalResponse.ACCEPT
+    assert second_response == GoalResponse.REJECT
+
+
+def test_invalid_managed_goal_returns_invalid_goal(
+    supervisor,
+):
+    """Return INVALID_GOAL for an accepted action containing an invalid pose."""
+    goal_handle = FakeManagedGoalHandle(make_goal(frame_id="odom"))
+
+    response = supervisor._managed_goal_callback(goal_handle.request)
+
+    assert response == GoalResponse.ACCEPT
+
+    result = asyncio.run(supervisor._execute_managed_navigation(goal_handle))
+
+    assert result.result_code == ManagedNavigate.Result.INVALID_GOAL
+    assert result.failed_region_recorded is False
+    assert goal_handle.terminal_state == "aborted"
+    assert supervisor._action_goal_reserved is False
+
+
+def test_immediate_managed_cancellation_returns_canceled(
+    supervisor,
+):
+    """Return CANCELED when an accepted action is immediately canceled."""
+    goal_handle = FakeManagedGoalHandle(
+        make_goal(),
+        cancel_requested=True,
+    )
+
+    goal_response = supervisor._managed_goal_callback(goal_handle.request)
+    cancel_response = supervisor._managed_cancel_callback(goal_handle)
+
+    assert goal_response == GoalResponse.ACCEPT
+    assert cancel_response == CancelResponse.ACCEPT
+
+    result = asyncio.run(supervisor._execute_managed_navigation(goal_handle))
+
+    assert result.result_code == ManagedNavigate.Result.CANCELED
+    assert result.failed_region_recorded is False
+    assert goal_handle.terminal_state == "canceled"
+    assert supervisor._action_goal_reserved is False
+
+
+def test_managed_nav2_failure_records_failed_region(
+    supervisor,
+    monkeypatch,
+):
+    """Return NAVIGATION_FAILED and report a stored failed region."""
+    goal_handle = FakeManagedGoalHandle(make_goal(x=1.5, y=-0.5))
+
+    monkeypatch.setattr(
+        supervisor,
+        "goToPose",
+        lambda goal: True,
+    )
+
+    assert supervisor.submit_goal(goal_handle.request.target_pose) is True
+
+    assert supervisor.update() is None
+    assert supervisor.state == NavigationState.NAVIGATING
+
+    monkeypatch.setattr(
+        supervisor,
+        "isTaskComplete",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "getResult",
+        lambda: TaskResult.FAILED,
+    )
+
+    outcome = supervisor.update()
+
+    assert outcome == NavigationOutcome.NAVIGATION_FAILED
+    assert supervisor._failed_region_recorded is True
+
+    result = supervisor._finish_managed_action(
+        goal_handle,
+        outcome,
+    )
+
+    assert result.result_code == ManagedNavigate.Result.NAVIGATION_FAILED
+    assert result.failed_region_recorded is True
+    assert goal_handle.terminal_state == "aborted"
+
+    regions = supervisor._failed_region_manager.get_regions()
+
+    assert len(regions) == 1
+    assert regions[0].center_x == pytest.approx(1.5)
+    assert regions[0].center_y == pytest.approx(-0.5)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_code", "expected_terminal_state"),
+    (
+        (
+            NavigationOutcome.SUCCEEDED,
+            ManagedNavigate.Result.SUCCEEDED,
+            "succeeded",
+        ),
+        (
+            NavigationOutcome.BLACKLISTED,
+            ManagedNavigate.Result.BLACKLISTED,
+            "aborted",
+        ),
+        (
+            NavigationOutcome.PLANNING_FAILED,
+            ManagedNavigate.Result.PLANNING_FAILED,
+            "aborted",
+        ),
+        (
+            NavigationOutcome.NAVIGATION_FAILED,
+            ManagedNavigate.Result.NAVIGATION_FAILED,
+            "aborted",
+        ),
+        (
+            NavigationOutcome.STUCK,
+            ManagedNavigate.Result.STUCK,
+            "aborted",
+        ),
+        (
+            NavigationOutcome.CANCELED,
+            ManagedNavigate.Result.CANCELED,
+            "canceled",
+        ),
+        (
+            NavigationOutcome.INVALID_GOAL,
+            ManagedNavigate.Result.INVALID_GOAL,
+            "aborted",
+        ),
+        (
+            NavigationOutcome.INTERNAL_ERROR,
+            ManagedNavigate.Result.INTERNAL_ERROR,
+            "aborted",
+        ),
+    ),
+)
+def test_managed_result_code_mapping(
+    supervisor,
+    outcome,
+    expected_code,
+    expected_terminal_state,
+):
+    """Preserve every result code defined by the ManagedNavigate interface."""
+    goal_handle = FakeManagedGoalHandle(make_goal())
+
+    result = supervisor._finish_managed_action(
+        goal_handle,
+        outcome,
+    )
+
+    assert result.result_code == expected_code
+    assert goal_handle.terminal_state == expected_terminal_state
