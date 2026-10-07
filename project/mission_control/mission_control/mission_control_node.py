@@ -63,11 +63,9 @@ class MissionControl(Node):
     def update_marker_location(self, msg: ArucoVerdict):
         """
         Callback for when an aruco_marker is detected on camera. Updates the
-        marker's stored pose as a running average of every detection seen so
-        far, weighted so that closer (more reliable) detections contribute
-        more strongly. Weighting is gentle rather than winner-takes-all, so a
-        single mislabelled/noisy reading can't wipe out an otherwise
-        well-established estimate.
+        marker's stored pose as a running cumulative weighted average of every 
+        detection seen so far, weighted so that closer (more reliable) 
+        detections contribute more strongly.
         """
         if not msg.detected:
             return
@@ -89,7 +87,7 @@ class MissionControl(Node):
             self._marker_weights[msg.id] = weight
         else:
             total_weight = old_weight + weight
-            blend = weight / old_weight + weight  #how much the new reading shifts the average
+            blend = weight / total_weight  #how much the new reading shifts the average
 
             avg_pose = Pose()
             avg_pose.position.x = old_pose.position.x + blend * (global_pose.position.x - old_pose.position.x)
@@ -116,7 +114,7 @@ class MissionControl(Node):
         try:
             #convert Pose from camera frame into global map frame
             transformed = self._tf_buffer.transform(
-                stamped, target_frame, timeout=Duration(nanoseconds = 10000000) #timeout for up to 0.1 second
+                stamped, target_frame, timeout=Duration(nanoseconds = 10000000) #timeout for up to 10ms
             )
             return transformed.pose              #type: ignore
         #if error occured, display error
