@@ -118,6 +118,7 @@ class CostmapLayer:
     grid: OccupancyGrid
     map_to_costmap: Optional[Callable[[float, float], Tuple[float, float]]] = None
     strict_bounds: bool = True
+    allow_unknown: bool = False
 
     def is_safe(self, x: float, y: float, cost_limit: int) -> bool:
         """Return True if the map-frame point is not too close to an obstacle."""
@@ -129,6 +130,8 @@ class CostmapLayer:
         if not _in_bounds(cell_x, cell_y, info.width, info.height):
             return not self.strict_bounds
         cost = self.grid.data[cell_y * info.width + cell_x]
+        if cost == UNKNOWN:
+            return self.allow_unknown
         return 0 <= cost <= cost_limit
 
 

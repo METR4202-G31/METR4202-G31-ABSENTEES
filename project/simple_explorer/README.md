@@ -1,3 +1,10 @@
+## Unknown Costmap Behavior
+
+The explorer enables `allow_unknown_costmap` in its default configuration so
+frontier goals are not rejected solely because Nav2 has not assigned that cell a
+cost yet. Nav2's planner must also have `allow_unknown: true`; the Humble NavFn
+configuration used by the launch files already enables that option. Unknown
+space is still subject to obstacle and path-planner checks.
 # simple_explorer
 
 Frontier exploration for the TurtleBot3. The `frontier_explorer` node decides

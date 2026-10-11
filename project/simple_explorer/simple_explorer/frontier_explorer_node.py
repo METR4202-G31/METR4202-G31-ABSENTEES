@@ -142,6 +142,7 @@ class FrontierExplorer(Node):
             "distance_weight": 1.0,
             "size_weight": 0.02,
             "cost_limit": 75,
+            "allow_unknown_costmap": False,
             "blacklist_radius": 0.5,
             "min_failure_count": 1,
             "robot_frame": "base_footprint",
@@ -238,14 +239,27 @@ class FrontierExplorer(Node):
         """Return the costmap layers to check, or None if one is not ready yet."""
         if self._global_costmap is None:
             return None
-        layers = [CostmapLayer(self._global_costmap, strict_bounds=True)]
+        allow_unknown = self.get_parameter("allow_unknown_costmap").value
+        layers = [
+            CostmapLayer(
+                self._global_costmap,
+                strict_bounds=True,
+                allow_unknown=allow_unknown,
+            )
+        ]
         local = self._local_costmap
         if local is None:
             return layers
         map_frame = self.get_parameter("map_frame").value
         frame = local.header.frame_id
         if frame in ("", map_frame):
-            layers.append(CostmapLayer(local, strict_bounds=False))
+            layers.append(
+                CostmapLayer(
+                    local,
+                    strict_bounds=False,
+                    allow_unknown=allow_unknown,
+                )
+            )
             return layers
         try:
             t = self._tf_buffer.lookup_transform(frame, map_frame, rclpy.time.Time())
@@ -265,7 +279,14 @@ class FrontierExplorer(Node):
         def to_local(x, y):
             return (cos_yaw * x - sin_yaw * y + tx, sin_yaw * x + cos_yaw * y + ty)
 
-        layers.append(CostmapLayer(local, to_local, strict_bounds=False))
+        layers.append(
+            CostmapLayer(
+                local,
+                to_local,
+                strict_bounds=False,
+                allow_unknown=allow_unknown,
+            )
+        )
         return layers
 
     # ---- main loop ---------------------------------------------------------

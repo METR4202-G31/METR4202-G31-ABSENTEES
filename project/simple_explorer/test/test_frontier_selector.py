@@ -263,6 +263,20 @@ def test_unknown_costmap_cell_is_unsafe():
     assert result.candidates == []
 
 
+def test_unknown_costmap_cell_can_be_allowed():
+    grid = make_grid(["?????", ".....", "....."])
+    selector = FrontierSelector(min_cluster_size=3)
+    costmap = make_grid(["?????", "?????", "?????"])
+
+    result = selector.rank_candidates(
+        grid,
+        robot_at(2.0, 0.0),
+        [CostmapLayer(costmap, allow_unknown=True)],
+    )
+
+    assert result.candidates
+
+
 def test_out_of_bounds_is_unsafe_for_global_but_not_for_local_costmap():
     grid = make_grid(["?????", ".....", "....."])
     selector = FrontierSelector(min_cluster_size=3)
