@@ -54,12 +54,11 @@ source ~/metr4202_ws/install/setup.bash
 
 # Running the Integrated Demo
 
-The following sequence reproduces the current demonstration.
+The integrated demo uses two terminals. The simulation is deliberately kept
+separate from the project nodes so the same project launch can be used with a
+physical TurtleBot3.
 
-The demonstration uses a generated Gazebo environment, autonomous frontier
-exploration, Nav2 navigation, ArUco detection and global marker localisation.
-
-## Terminal 1 - Gazebo Test World
+## Terminal 1 - Simulation
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -68,74 +67,38 @@ source ~/metr4202_ws/install/setup.bash
 export TURTLEBOT3_MODEL=waffle_pi
 
 ros2 launch test_worlds explore.launch.py \
-    rows:=20 \
-    cols:=20 \
+    rows:=30 \
+    cols:=30 \
     cell_size:=0.75 \
-    features:="" \
+    features:="room:3,dead_end:2,narrow_passage:4,large_empty_space:1,l_corridor:3,wall_section:2,plus:2" \
     seed:=42
 ```
 
 This generates a deterministic Gazebo world, places the TurtleBot3 and ArUco
-marker models, and starts the simulation.
+marker models, and starts simulation infrastructure only. Wait for the robot
+to spawn before starting the project stack.
 
-Wait for the robot to spawn before starting the remaining nodes.
-
-## Terminal 2 - Navigation Supervisor
-
-```bash
-source /opt/ros/humble/setup.bash
-source ~/metr4202_ws/install/setup.bash
-
-ros2 run navigation_supervisor navigation_supervisor \
-    --ros-args -p use_sim_time:=true
-```
-
-This starts the `ManagedNavigate` action server so that it is available
-before the Frontier Explorer is launched.
-
-## Terminal 3 - ArUco Detector
+## Terminal 2 - Complete Project Stack
 
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/metr4202_ws/install/setup.bash
 
-ros2 run aruco_detector aruco_detector_node \
-    --ros-args -p use_sim_time:=true
+ros2 launch simple_explorer project.launch.py use_sim_time:=true
 ```
 
-The detector processes the TurtleBot3 camera feed and publishes detections on:
-
-```text
-/aruco
-```
-
-## Terminal 4 - Mission Control
-
-```bash
-source /opt/ros/humble/setup.bash
-source ~/metr4202_ws/install/setup.bash
-
-ros2 run mission_control mission_control_node \
-    --ros-args -p use_sim_time:=true
-```
-
-Mission Control transforms detected ArUco marker positions from the camera frame
-into the global `map` frame and stores the resulting marker positions.
-
-
-## Terminal 5 - SLAM, Nav2 and Frontier Explorer
-
-```bash
-source /opt/ros/humble/setup.bash
-source ~/metr4202_ws/install/setup.bash
-
-ros2 launch simple_explorer explore.launch.py use_sim_time:=true
-```
-
-This starts SLAM Toolbox, Nav2, RViz and the Frontier Explorer.
+This starts the navigation supervisor, ArUco detector, mission control, SLAM
+Toolbox, Nav2, RViz and the Frontier Explorer. The supervisor action server is
+started in the same launch before the explorer stack; the explorer remains in
+`WAITING` until its required action and Nav2 services are available.
 
 Once SLAM, Nav2, the required costmaps and transforms are available, the
 Frontier Explorer begins selecting and sending navigation goals.
+
+For a physical TurtleBot3, run the robot's hardware bringup in place of
+Terminal 1 and start Terminal 2 with the default `use_sim_time:=false`.
+The hardware bringup must provide the camera, `/scan`, `/odom`, and the TF
+frames used by SLAM, Nav2, ArUco detection, and Mission Control.
 
 # Expected Demo Behaviour
 
@@ -227,6 +190,10 @@ Example:
 ```bash
 ros2 launch simple_explorer explore.launch.py
 ```
+
+The lower-level `explore.launch.py` remains available when only SLAM, Nav2,
+RViz, and frontier exploration are needed. The complete two-terminal project
+stack is `project.launch.py`.
 
 Example which also loads a world file and spawns the TurtleBot3:
 

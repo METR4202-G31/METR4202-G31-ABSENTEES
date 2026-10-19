@@ -67,9 +67,15 @@ TURTLEBOT3_MODEL=waffle_pi ros2 launch simple_explorer exploration_demo.launch.p
 
 # SLAM + Nav2 + RViz + explorer, when the simulator is already running
 ros2 launch simple_explorer explore.launch.py
+
+# Complete project stack, when simulation or robot bringup is already running
+ros2 launch simple_explorer project.launch.py use_sim_time:=true
 ```
 
 Until a `ManagedNavigate` server is running the explorer stays in `WAITING`.
+`project.launch.py` starts that server together with the explorer, as well as
+the ArUco detector and Mission Control. Use `use_sim_time:=false` (the default)
+with a physical robot.
 
 Stop or resume from the command line:
 

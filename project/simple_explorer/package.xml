@@ -26,6 +26,9 @@
   <exec_depend>slam_toolbox</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>rviz2</exec_depend>
+  <exec_depend>navigation_supervisor</exec_depend>
+  <exec_depend>aruco_detector</exec_depend>
+  <exec_depend>mission_control</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
