@@ -1,7 +1,7 @@
 frontier_explorer:
   ros__parameters:
     # Frontier detection and scoring
-    min_cluster_size: 8          # cells; smaller frontiers are noise
+    min_cluster_size: 50         # cells; smaller frontiers are noise
     min_goal_distance: 0.6       # m; never pick a goal closer to the robot than this
     revisit_radius: 0.5          # m; do not re-pick goals near recently visited ones
     max_history: 20

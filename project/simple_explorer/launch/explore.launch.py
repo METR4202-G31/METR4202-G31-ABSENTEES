@@ -17,6 +17,9 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
 
     nav2_bringup_dir = get_package_share_directory("nav2_bringup")
+    navigation_supervisor_dir = get_package_share_directory(
+        "navigation_supervisor"
+    )
     slam_toolbox_dir = get_package_share_directory("slam_toolbox")
 
     slam = IncludeLaunchDescription(
@@ -33,9 +36,9 @@ def generate_launch_description():
     )
 
     nav2_params = os.path.join(
-        nav2_bringup_dir,
-        "params",
-        "nav2_params.yaml",
+        navigation_supervisor_dir,
+        "config",
+        "nav2_unknown_space.yaml",
     )
 
     nav2 = IncludeLaunchDescription(

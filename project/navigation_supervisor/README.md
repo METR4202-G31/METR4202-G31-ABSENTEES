@@ -299,6 +299,9 @@ ros2 run navigation_supervisor navigation_supervisor \
     --ros-args -p use_sim_time:=true
 ```
 
+The Nav2 parameters installed with this package treat unknown costmap cells as
+traversable, allowing navigation through unmapped holes during exploration.
+
 ## Inspect the Action Server
 
 ```bash
