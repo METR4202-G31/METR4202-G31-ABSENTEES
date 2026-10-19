@@ -7,18 +7,28 @@ not drive Nav2 itself.
 ## How it works
 
 1. Find frontier cells (free cells next to unknown space) in the SLAM `/map` and
-   group them into clusters. Clusters under `min_cluster_size` cells are noise.
-2. For each cluster pick one goal cell: a free frontier cell near the cluster
-   centroid that is at least `min_goal_distance` from the robot, safe in the
-   global and local costmaps, not blacklisted, and not near a goal already visited.
-3. Rank clusters (closer and bigger is better) and, if `precheck_path` is set, ask
+   group them into clusters. Clusters under `min_cluster_size` cells (default 20,
+   i.e. 1 m) are noise or too small to be worth the trip; the aim is to reach
+   unknown space quickly, not to map every corner.
+2. Work out the driving distance from the robot to every known free cell: a
+   shortest-path search over free space with walls inflated by
+   `travel_clearance`, on ~0.1 m cells. Frontiers behind a wall therefore count
+   as far away, and frontiers that cannot be reached through known free space
+   are dropped without asking the planner. (`use_travel_distance: false` goes
+   back to straight-line distances.)
+3. For each cluster pick one goal cell: a reachable free frontier cell near the
+   cluster centroid that is at least `min_goal_distance` from the robot, safe in
+   the global and local costmaps, not blacklisted, and not near a goal already
+   visited.
+4. Rank clusters by `distance_weight * driving distance - size_weight * cluster
+   size` (shorter drive and bigger frontier is better) and, if `precheck_path` is set, ask
    the Nav2 planner (`compute_path_to_pose`) whether a path exists. A goal with no
    path is blacklisted and published on `/explore/blacklist`.
-4. Publish the goal on `/explore` and send it to the supervisor's `ManagedNavigate`
+5. Publish the goal on `/explore` and send it to the supervisor's `ManagedNavigate`
    action. One outcome comes back per goal.
-5. If the frontier disappears after a map update the goal is cancelled and a new
+6. If the frontier disappears after a map update the goal is cancelled and a new
    one is chosen.
-6. When no cluster yields a goal for a few cycles the node publishes a `DONE_*`
+7. When no cluster yields a goal for a few cycles the node publishes a `DONE_*`
    status and stops sending goals.
 
 ## Blacklist

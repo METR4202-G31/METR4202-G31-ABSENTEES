@@ -1,13 +1,15 @@
 frontier_explorer:
   ros__parameters:
     # Frontier detection and scoring
-    min_cluster_size: 8          # cells; smaller frontiers are noise
+    min_cluster_size: 20         # cells (1 m at 0.05 m/cell); smaller frontiers are noise or not worth the trip
     min_goal_distance: 0.6       # m; never pick a goal closer to the robot than this
     revisit_radius: 0.5          # m; do not re-pick goals near recently visited ones
     max_history: 20
-    distance_weight: 1.0
-    size_weight: 0.02
+    distance_weight: 1.0         # score per metre of driving distance
+    size_weight: 0.1             # score per frontier cell: a 1 m (20-cell) frontier is worth 2 m of driving
     cost_limit: 75               # Nav2 cost above which a goal is too close to an obstacle
+    use_travel_distance: true    # score by driving distance through known free space (false: straight line)
+    travel_clearance: 0.15       # m; walls are inflated by this for the driving-distance search
 
     # Blacklist
     blacklist_radius: 0.5        # m; circle around goals the explorer rejects itself
