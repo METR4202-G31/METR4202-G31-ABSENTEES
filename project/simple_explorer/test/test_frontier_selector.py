@@ -12,12 +12,14 @@ import math
 
 from geometry_msgs.msg import Pose
 from nav_msgs.msg import OccupancyGrid
+import numpy as np
 import pytest
 
 from simple_explorer.frontier_selector import (
     CostmapLayer,
     frontier_near,
     FrontierSelector,
+    TravelMap,
 )
 
 
@@ -332,3 +334,118 @@ def test_frontier_near_finds_and_misses_frontiers():
     assert frontier_near(grid, 2.5, 0.5, 1.5)
     assert not frontier_near(grid, 2.5, 0.5, 0.4)
     assert not frontier_near(grid, 100.0, 100.0, 1.0)
+
+
+# A wall splits the map. The left frontier is only 2 m away in a straight
+# line but the robot has to drive round the end of the wall to reach it;
+# the right frontier is further in a straight line but has a direct drive.
+#   robot starts at (3.5, 0.5), bottom of the right-hand side.
+BEHIND_WALL = [
+    "???#?????",
+    "...#.....",
+    "...#.....",
+    "...#.....",
+    "...#.....",
+    "...#.....",
+    "...#.....",
+    ".........",
+]
+
+
+def test_travel_map_measures_driving_distance_round_walls():
+    grid = make_grid(BEHIND_WALL)
+    array = np.asarray(grid.data, dtype=np.int16).reshape(
+        grid.info.height, grid.info.width
+    )
+    travel = TravelMap(array, grid.info.resolution, (4, 1), clearance=0.0)
+
+    assert travel.valid
+    assert travel.distance(4, 1) == 0.0
+    # (2, 1) is straight across the wall: 2 cells away, but the drive goes
+    # diagonally down round the wall end at y=0 and back up.
+    assert travel.distance(2, 1) == pytest.approx(2 * math.sqrt(2.0))
+    # Further up the wall the detour grows: round the end, then up 5.
+    assert travel.distance(2, 6) == pytest.approx(2 * math.sqrt(2.0) + 5)
+    # Unknown cells are never entered.
+    assert math.isinf(travel.distance(0, 7))
+
+
+def test_prefers_frontier_with_the_shorter_drive_not_the_straight_line():
+    grid = make_grid(BEHIND_WALL)
+    robot = robot_at(2.5, 5.5)    # left of the wall, near the top
+
+    straight = FrontierSelector(
+        min_cluster_size=3, use_travel_distance=False, size_weight=0.0
+    )
+    driving = FrontierSelector(min_cluster_size=3, size_weight=0.0)
+
+    # Straight-line distances make the right frontier (just over the wall)
+    # look as close as the left one; driving distance does not.
+    assert goal_xy(driving.rank_candidates(grid, robot).candidates[0])[0] < 3.0
+    straight_best = straight.rank_candidates(grid, robot).candidates
+    driving_best = driving.rank_candidates(grid, robot).candidates
+    assert driving_best[1].score > straight_best[1].score
+
+
+def test_unreachable_frontier_is_dropped_and_counted():
+    rows = [
+        "?????",
+        ".....",
+        "#####",
+        ".....",
+    ]
+    grid = make_grid(rows)
+    selector = FrontierSelector(min_cluster_size=3)
+
+    result = selector.rank_candidates(grid, robot_at(2.5, 0.5))
+
+    assert len(result.clusters) == 1
+    assert result.candidates == []
+    assert result.unreachable_clusters == 1
+    assert result.blocked_clusters == 0
+
+
+def test_falls_back_to_straight_line_when_robot_is_not_on_free_space():
+    rows = [
+        "?????",
+        ".....",
+        ".....",
+        "????.",
+    ]
+    grid = make_grid(rows)
+    selector = FrontierSelector(min_cluster_size=3)
+
+    # Robot on an unknown cell: no driving distances, but goals still come.
+    result = selector.rank_candidates(grid, robot_at(0.5, 0.5))
+
+    assert result.candidates
+    assert result.unreachable_clusters == 0
+
+
+def test_clearance_closes_gaps_narrower_than_the_robot():
+    # 5 cm cells; the wall has a one-cell (5 cm) gap.
+    rows = [
+        "?????????",
+        ".........",
+        ".........",
+        ".........",
+        "####.####",
+        ".........",
+        ".........",
+        ".........",
+        ".........",
+    ]
+    grid = make_grid(rows, resolution=0.05)
+    robot = robot_at(0.225, 0.025)    # bottom row, below the gap
+    narrow = FrontierSelector(
+        min_cluster_size=3, min_goal_distance=0.0, travel_clearance=0.1
+    )
+    thin = FrontierSelector(
+        min_cluster_size=3, min_goal_distance=0.0, travel_clearance=0.0
+    )
+
+    # Passable for a point robot, closed once walls are inflated by 0.1 m.
+    assert thin.rank_candidates(grid, robot).candidates
+    blocked = narrow.rank_candidates(grid, robot)
+    assert blocked.candidates == []
+    assert blocked.unreachable_clusters == 1

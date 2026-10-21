@@ -74,6 +74,8 @@ class FrontierExplorer(Node):
             distance_weight=p("distance_weight").value,
             size_weight=p("size_weight").value,
             cost_limit=p("cost_limit").value,
+            use_travel_distance=p("use_travel_distance").value,
+            travel_clearance=p("travel_clearance").value,
         )
         self._blacklist = GoalBlacklist(
             default_radius=p("blacklist_radius").value,
@@ -135,13 +137,15 @@ class FrontierExplorer(Node):
 
     def _declare_parameters(self):
         defaults = {
-            "min_cluster_size": 8,
+            "min_cluster_size": 20,
             "min_goal_distance": 0.6,
             "revisit_radius": 0.5,
             "max_history": 20,
             "distance_weight": 1.0,
-            "size_weight": 0.02,
+            "size_weight": 0.1,
             "cost_limit": 75,
+            "use_travel_distance": True,
+            "travel_clearance": 0.15,
             "blacklist_radius": 0.5,
             "min_failure_count": 1,
             "robot_frame": "base_footprint",
@@ -306,6 +310,11 @@ class FrontierExplorer(Node):
         if not result.candidates:
             self._empty_cycles += 1
             if self._empty_cycles >= self.get_parameter("empty_cycles_to_finish").value:
+                if result.unreachable_clusters:
+                    self.get_logger().info(
+                        "%d frontier(s) cannot be reached through known free space."
+                        % result.unreachable_clusters
+                    )
                 self._finish(result.blocked_clusters > 0)
             return
         self._empty_cycles = 0
