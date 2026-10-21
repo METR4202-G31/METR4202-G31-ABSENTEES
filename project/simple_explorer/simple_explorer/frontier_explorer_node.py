@@ -76,6 +76,11 @@ class FrontierExplorer(Node):
             cost_limit=p("cost_limit").value,
             use_travel_distance=p("use_travel_distance").value,
             travel_clearance=p("travel_clearance").value,
+            gain_weight=p("gain_weight").value,
+            min_gain=p("min_gain").value,
+            gain_radius=p("gain_radius").value,
+            max_gain_area=p("max_gain_area").value,
+            turn_weight=p("turn_weight").value,
         )
         self._blacklist = GoalBlacklist(
             default_radius=p("blacklist_radius").value,
@@ -146,6 +151,11 @@ class FrontierExplorer(Node):
             "cost_limit": 75,
             "use_travel_distance": True,
             "travel_clearance": 0.15,
+            "gain_weight": 0.0,
+            "min_gain": 0.0,
+            "gain_radius": 3.0,
+            "max_gain_area": 12.0,
+            "turn_weight": 0.0,
             "blacklist_radius": 0.5,
             "min_failure_count": 1,
             "robot_frame": "base_footprint",
@@ -310,6 +320,11 @@ class FrontierExplorer(Node):
         if not result.candidates:
             self._empty_cycles += 1
             if self._empty_cycles >= self.get_parameter("empty_cycles_to_finish").value:
+                if result.low_gain_clusters:
+                    self.get_logger().info(
+                        "%d frontier(s) ignored: too little unknown space behind them."
+                        % result.low_gain_clusters
+                    )
                 if result.unreachable_clusters:
                     self.get_logger().info(
                         "%d frontier(s) cannot be reached through known free space."
@@ -422,9 +437,9 @@ class FrontierExplorer(Node):
         self._state = NAVIGATING
         self._last_validity_check = self._now()
         self.get_logger().info(
-            "Goal (%.2f, %.2f) size=%d score=%.2f" % (
+            "Goal (%.2f, %.2f) size=%d gain=%.1fm2 score=%.2f" % (
                 pose.pose.position.x, pose.pose.position.y,
-                candidate.cluster_size, candidate.score,
+                candidate.cluster_size, candidate.gain, candidate.score,
             )
         )
         self._nav_client.send_goal_async(goal).add_done_callback(self._on_goal_response)

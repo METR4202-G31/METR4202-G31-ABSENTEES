@@ -1,15 +1,28 @@
 frontier_explorer:
   ros__parameters:
     # Frontier detection and scoring
-    min_cluster_size: 20         # cells (1 m at 0.05 m/cell); smaller frontiers are noise or not worth the trip
+    min_cluster_size: 10         # cells (0.5 m at 0.05 m/cell). Was 20, which silently dropped the
+                                 # frontier across a 0.65 m corridor (~13 cells). Specks are now
+                                 # filtered by min_gain instead.
     min_goal_distance: 0.6       # m; never pick a goal closer to the robot than this
     revisit_radius: 0.5          # m; do not re-pick goals near recently visited ones
     max_history: 20
     distance_weight: 1.0         # score per metre of driving distance
-    size_weight: 0.1             # score per frontier cell: a 1 m (20-cell) frontier is worth 2 m of driving
+    size_weight: 0.0             # score per frontier cell. Was 0.1, but frontier length is a poor
+                                 # guide: the ring around an unmapped speck is long, a corridor
+                                 # opening is short. Replaced by gain_weight below.
     cost_limit: 75               # Nav2 cost above which a goal is too close to an obstacle
     use_travel_distance: true    # score by driving distance through known free space (false: straight line)
     travel_clearance: 0.15       # m; walls are inflated by this for the driving-distance search
+
+    # Information gain and turn penalty. For the original behaviour set gain_weight,
+    # min_gain and turn_weight to 0.0, min_cluster_size to 20 and size_weight to 0.1.
+    gain_weight: 1.0             # score per m^2 of unknown space behind a frontier
+    min_gain: 0.25               # m^2; frontiers hiding less (unmapped specks) are ignored
+    gain_radius: 3.0             # m; how far the flood fill into unknown space reaches
+    max_gain_area: 2.0           # m^2; gain cap, so any "real" frontier scores about the same
+                                 # and distance/turning decide between them (no cross-map trips)
+    turn_weight: 0.5             # score per radian of turning: going straight back costs ~1.6 m
 
     # Blacklist
     blacklist_radius: 0.5        # m; circle around goals the explorer rejects itself

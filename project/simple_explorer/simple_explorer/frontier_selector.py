@@ -19,6 +19,17 @@ Pipeline:
   - score clusters (shorter drive and bigger is better) and return them
     best-first.
 
+Optional scoring terms (all off by default, switched on in the YAML config):
+  - information gain: how much unknown space actually lies behind a
+    frontier, found by flood-filling into the unknown cells next to it.
+    A small unmapped speck in the middle of a mapped room is enclosed by
+    free cells, so its flood fill stops almost immediately and its gain is
+    tiny, while a corridor leading into unexplored space has a large gain.
+    Clusters below min_gain are ignored.
+  - turn penalty: frontiers that need the robot to turn around cost more
+    than frontiers roughly ahead of it, so it finishes the corridor or room
+    it is in before going back.
+
 Exploration is finished when no cluster yields a goal. The result records
 whether clusters were dropped because of the blacklist, so the caller can
 tell "nothing left" from "only blacklisted frontiers left".
@@ -91,6 +102,49 @@ def _yaw_of(q) -> float:
         2.0 * (q.w * q.z + q.x * q.y),
         1.0 - 2.0 * (q.y * q.y + q.z * q.z),
     )
+
+
+def _wrap_angle(angle: float) -> float:
+    """Wrap an angle to [-pi, pi]."""
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+NEIGHBOURS_4 = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+
+
+def information_gain(data: np.ndarray, cluster, max_depth: int, max_cells: int) -> int:
+    """
+    Count the unknown cells "behind" a frontier cluster.
+
+    Flood-fills (breadth-first search) through UNKNOWN cells only, starting
+    from the unknown cells that touch the cluster, and stops after
+    max_depth steps (roughly the sensor range in cells) or once max_cells
+    cells have been counted. Returns the number of unknown cells reached.
+
+    4-connected moves are used so the fill cannot squeeze diagonally
+    between two occupied cells of a wall.
+    """
+    height, width = data.shape
+    seen = set()
+    queue = deque()
+    for cx, cy in cluster:
+        for dx, dy in NEIGHBOURS_4:
+            nx, ny = cx + dx, cy + dy
+            if (_in_bounds(nx, ny, width, height) and data[ny, nx] == UNKNOWN
+                    and (nx, ny) not in seen):
+                seen.add((nx, ny))
+                queue.append((nx, ny, 0))
+    while queue and len(seen) < max_cells:
+        x, y, depth = queue.popleft()
+        if depth >= max_depth:
+            continue
+        for dx, dy in NEIGHBOURS_4:
+            nx, ny = x + dx, y + dy
+            if (_in_bounds(nx, ny, width, height) and data[ny, nx] == UNKNOWN
+                    and (nx, ny) not in seen):
+                seen.add((nx, ny))
+                queue.append((nx, ny, depth + 1))
+    return min(len(seen), max_cells)
 
 
 def cell_to_world(grid: OccupancyGrid, x: float, y: float) -> Tuple[float, float]:
@@ -249,6 +303,7 @@ class FrontierCandidate:
     pose: PoseStamped
     score: float
     cluster_size: int
+    gain: float = 0.0   # m^2 of unknown space behind the frontier (0 if unused)
 
 
 @dataclass
@@ -259,6 +314,7 @@ class SelectionResult:
     clusters: List[List[Tuple[int, int]]] = field(default_factory=list)
     blocked_clusters: int = 0
     unreachable_clusters: int = 0
+    low_gain_clusters: int = 0
 
 
 class FrontierSelector:
@@ -275,6 +331,11 @@ class FrontierSelector:
         cost_limit: int = COSTMAP_COST_LIMIT,
         use_travel_distance: bool = True,
         travel_clearance: float = 0.15,
+        gain_weight: float = 0.0,
+        min_gain: float = 0.0,
+        gain_radius: float = 3.0,
+        max_gain_area: float = 12.0,
+        turn_weight: float = 0.0,
     ):
         self.min_cluster_size = min_cluster_size
         self.use_travel_distance = use_travel_distance
@@ -284,6 +345,11 @@ class FrontierSelector:
         self.distance_weight = distance_weight
         self.size_weight = size_weight
         self.cost_limit = cost_limit
+        self.gain_weight = gain_weight      # score per m^2 of unknown behind a frontier
+        self.min_gain = min_gain            # m^2; frontiers hiding less are ignored
+        self.gain_radius = gain_radius      # m; how far the flood fill reaches
+        self.max_gain_area = max_gain_area  # m^2; cap so one frontier cannot dominate
+        self.turn_weight = turn_weight      # score per radian the robot must turn
         self._history: deque = deque(maxlen=max_history)
 
     # ---- history: avoiding goals that were already visited -------------
@@ -356,9 +422,23 @@ class FrontierSelector:
             return 0.0
         return math.atan2(dy_sum, dx_sum)
 
-    def _score(self, dist: float, cluster_size: int) -> float:
-        """Return the cost of a goal (lower is better): close and big wins."""
-        return self.distance_weight * dist - self.size_weight * cluster_size
+    def _score(
+        self, dist: float, cluster_size: int, gain: float = 0.0, turn: float = 0.0
+    ) -> float:
+        """
+        Return the cost of a goal (lower is better).
+
+        dist  : driving distance (m)              -> shorter is better
+        size  : frontier cells in the cluster     -> bigger is better
+        gain  : m^2 of unknown space behind it    -> more is better
+        turn  : radians the robot must turn to it -> less is better
+        """
+        return (
+            self.distance_weight * dist
+            - self.size_weight * cluster_size
+            - self.gain_weight * gain
+            + self.turn_weight * turn
+        )
 
     def _pick_goal_cell(
         self,
@@ -414,6 +494,11 @@ class FrontierSelector:
         """Return frontier goals best-first (empty when exploration is complete)."""
         robot_x = robot_pose.position.x
         robot_y = robot_pose.position.y
+        robot_yaw = _yaw_of(robot_pose.orientation)
+        use_gain = self.gain_weight > 0.0 or self.min_gain > 0.0
+        cell_area = grid.info.resolution ** 2
+        gain_depth = int(round(self.gain_radius / grid.info.resolution))
+        gain_cap = int(self.max_gain_area / cell_area)
 
         clusters = self.find_clusters(grid)
         result = SelectionResult(clusters=clusters)
@@ -433,6 +518,14 @@ class FrontierSelector:
             # calling every frontier unreachable.
 
         for cluster in clusters:
+            gain = 0.0
+            if use_gain:
+                gain = information_gain(data, cluster, gain_depth, gain_cap) * cell_area
+                if gain < self.min_gain:
+                    # e.g. an unmapped speck inside a room: nothing behind it.
+                    result.low_gain_clusters += 1
+                    continue
+
             picked, blocked, unreachable = self._pick_goal_cell(
                 grid, cluster, robot_x, robot_y, costmaps, is_blocked, travel
             )
@@ -455,11 +548,17 @@ class FrontierSelector:
             pose.pose.orientation.z = qz
             pose.pose.orientation.w = qw
 
+            # How far the robot must turn to face the goal (0 = dead ahead,
+            # pi = directly behind). Straight-line bearing is good enough here.
+            bearing = math.atan2(goal_y - robot_y, goal_x - robot_x)
+            turn = abs(_wrap_angle(bearing - robot_yaw))
+
             result.candidates.append(
                 FrontierCandidate(
                     pose=pose,
-                    score=self._score(dist, len(cluster)),
+                    score=self._score(dist, len(cluster), gain, turn),
                     cluster_size=len(cluster),
+                    gain=gain,
                 )
             )
 

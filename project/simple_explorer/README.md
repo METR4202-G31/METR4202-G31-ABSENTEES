@@ -21,7 +21,13 @@ not drive Nav2 itself.
    the global and local costmaps, not blacklisted, and not near a goal already
    visited.
 4. Rank clusters by `distance_weight * driving distance - size_weight * cluster
-   size` (shorter drive and bigger frontier is better) and, if `precheck_path` is set, ask
+   size - gain_weight * gain + turn_weight * turn` (shorter drive, more unknown space
+   behind the frontier and less turning is better). *Gain* is the area of unknown
+   space reached by flood-filling from the frontier into unknown cells (capped at
+   `max_gain_area`); a frontier with less than `min_gain` behind it, such as an
+   unmapped speck inside an already-mapped room, is ignored. *Turn* is how far
+   the robot must turn to face the goal, which keeps it finishing the corridor or
+   room it is in. If `precheck_path` is set, ask
    the Nav2 planner (`compute_path_to_pose`) whether a path exists. A goal with no
    path is blacklisted and published on `/explore/blacklist`.
 5. Publish the goal on `/explore` and send it to the supervisor's `ManagedNavigate`
