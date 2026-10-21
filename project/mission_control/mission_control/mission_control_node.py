@@ -74,10 +74,14 @@ class MissionControl(Node):
         global_pose = self.transform_to_global(msg.pose, msg.header)
         if global_pose is None:  #check for error
             return
+        
 
-        #gentle inverse-distance weighting: closer detections count more, but
+        #inverse-distance weighting: closer detections count more, but
         #even far ones still contribute a little rather than being ignored
-        weight = 1.0 / (1.0 + new_dist)
+        weight = 1.0 / (1.0 + 5 * new_dist) #makes 2m ~half as weighted as 1m
+        
+        if new_dist < 0.1: #a distance this close is likely an error so weight it tiny
+            weight = 0.01
 
         old_pose = self._markers.get(msg.id)
         old_weight = self._marker_weights.get(msg.id, 0.0)
