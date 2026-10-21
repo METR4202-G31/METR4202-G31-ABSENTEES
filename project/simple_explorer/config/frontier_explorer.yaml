@@ -9,6 +9,15 @@ frontier_explorer:
     size_weight: 0.02
     cost_limit: 75               # Nav2 cost above which a goal is too close to an obstacle
 
+    # Information gain and turn penalty. For the original behaviour set gain_weight,
+    # min_gain and turn_weight to 0.0, min_cluster_size to 20 and size_weight to 0.1.
+    gain_weight: 1.0             # score per m^2 of unknown space behind a frontier
+    min_gain: 0.25               # m^2; frontiers hiding less (unmapped specks) are ignored
+    gain_radius: 3.0             # m; how far the flood fill into unknown space reaches
+    max_gain_area: 2.0           # m^2; gain cap, so any "real" frontier scores about the same
+                                 # and distance/turning decide between them (no cross-map trips)
+    turn_weight: 0.5             # score per radian of turning: going straight back costs ~1.6 m
+
     # Blacklist
     blacklist_radius: 0.5        # m; circle around goals the explorer rejects itself
     min_failure_count: 1         # supervisor failed regions with fewer failures are ignored
