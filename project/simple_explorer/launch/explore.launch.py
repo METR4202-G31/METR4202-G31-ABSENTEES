@@ -18,6 +18,24 @@ def generate_launch_description():
 
     nav2_bringup_dir = get_package_share_directory("nav2_bringup")
     slam_toolbox_dir = get_package_share_directory("slam_toolbox")
+    slam_setup_dir = get_package_share_directory("slam_setup")
+
+    # Our own slam_toolbox settings: reads /scan_filled, max_laser_range 3.0,
+    # map_update_interval 1.0. See slam_setup/config/slam_toolbox_params.yaml.
+    slam_params = os.path.join(
+        slam_setup_dir,
+        "config",
+        "slam_toolbox_params.yaml",
+    )
+
+    # Fills "no hit" LiDAR beams so SLAM clears free space in open areas.
+    scan_filler = Node(
+        package="slam_setup",
+        executable="scan_filler_node",
+        name="scan_filler",
+        output="screen",
+        parameters=[{"use_sim_time": use_sim_time}],
+    )
 
     slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -29,6 +47,7 @@ def generate_launch_description():
         ),
         launch_arguments={
             "use_sim_time": use_sim_time,
+            "slam_params_file": slam_params,
         }.items(),
     )
 
@@ -103,6 +122,6 @@ def generate_launch_description():
                 default_value="true",
                 description="Use Gazebo simulation time",
             ),
-            slam, nav2, rviz, explorer,
+            scan_filler, slam, nav2, rviz, explorer,
         ]
     )
