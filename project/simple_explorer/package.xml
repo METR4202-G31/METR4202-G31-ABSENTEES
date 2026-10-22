@@ -24,6 +24,7 @@
 
   <exec_depend>turtlebot3_gazebo</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>slam_setup</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>navigation_supervisor</exec_depend>

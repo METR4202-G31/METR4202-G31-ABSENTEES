@@ -1,16 +1,25 @@
 frontier_explorer:
   ros__parameters:
     # Frontier detection and scoring
-    min_cluster_size: 8          # cells; smaller frontiers are noise
-    min_goal_distance: 0.6       # m; never pick a goal closer to the robot than this
-    revisit_radius: 0.5          # m; do not re-pick goals near recently visited ones
+    min_cluster_size: 20         # cells; smaller frontiers are noise
+    min_goal_distance: 0.1       # m; never pick a goal closer to the robot than this
+    revisit_radius: 0.1          # m; do not re-pick goals near recently visited ones
     max_history: 20
     distance_weight: 1.0
     size_weight: 0.02
     cost_limit: 75               # Nav2 cost above which a goal is too close to an obstacle
 
+    # Information gain and turn penalty. For the original behaviour set gain_weight,
+    # min_gain and turn_weight to 0.0, min_cluster_size to 20 and size_weight to 0.1.
+    gain_weight: 1.0             # score per m^2 of unknown space behind a frontier
+    min_gain: 0.25               # m^2; frontiers hiding less (unmapped specks) are ignored
+    gain_radius: 3.0             # m; how far the flood fill into unknown space reaches
+    max_gain_area: 2.0           # m^2; gain cap, so any "real" frontier scores about the same
+                                 # and distance/turning decide between them (no cross-map trips)
+    turn_weight: 0.5             # score per radian of turning: going straight back costs ~1.6 m
+
     # Blacklist
-    blacklist_radius: 0.5        # m; circle around goals the explorer rejects itself
+    blacklist_radius: 0.1        # m; circle around goals the explorer rejects itself
     min_failure_count: 1         # supervisor failed regions with fewer failures are ignored
 
     # Frames

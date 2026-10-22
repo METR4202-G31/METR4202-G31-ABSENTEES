@@ -74,7 +74,7 @@ class FrontierExplorer(Node):
             distance_weight=p("distance_weight").value,
             size_weight=p("size_weight").value,
             cost_limit=p("cost_limit").value,
-        )
+       )
         self._blacklist = GoalBlacklist(
             default_radius=p("blacklist_radius").value,
             min_failure_count=p("min_failure_count").value,
@@ -142,7 +142,7 @@ class FrontierExplorer(Node):
             "distance_weight": 1.0,
             "size_weight": 0.02,
             "cost_limit": 75,
-            "blacklist_radius": 0.5,
+           "blacklist_radius": 0.5,
             "min_failure_count": 1,
             "robot_frame": "base_footprint",
             "map_frame": "map",
@@ -413,9 +413,9 @@ class FrontierExplorer(Node):
         self._state = NAVIGATING
         self._last_validity_check = self._now()
         self.get_logger().info(
-            "Goal (%.2f, %.2f) size=%d score=%.2f" % (
+            "Goal (%.2f, %.2f) size=%d gain=%.1fm2 score=%.2f" % (
                 pose.pose.position.x, pose.pose.position.y,
-                candidate.cluster_size, candidate.score,
+                candidate.cluster_size, candidate.gain, candidate.score,
             )
         )
         self._nav_client.send_goal_async(goal).add_done_callback(self._on_goal_response)
