@@ -1,9 +1,9 @@
 frontier_explorer:
   ros__parameters:
     # Frontier detection and scoring
-    min_cluster_size: 8          # cells; smaller frontiers are noise
-    min_goal_distance: 0.6       # m; never pick a goal closer to the robot than this
-    revisit_radius: 0.5          # m; do not re-pick goals near recently visited ones
+    min_cluster_size: 20         # cells; smaller frontiers are noise
+    min_goal_distance: 0.1       # m; never pick a goal closer to the robot than this
+    revisit_radius: 0.1          # m; do not re-pick goals near recently visited ones
     max_history: 20
     distance_weight: 1.0
     size_weight: 0.02
@@ -19,7 +19,7 @@ frontier_explorer:
     turn_weight: 0.5             # score per radian of turning: going straight back costs ~1.6 m
 
     # Blacklist
-    blacklist_radius: 0.5        # m; circle around goals the explorer rejects itself
+    blacklist_radius: 0.1        # m; circle around goals the explorer rejects itself
     min_failure_count: 1         # supervisor failed regions with fewer failures are ignored
 
     # Frames
