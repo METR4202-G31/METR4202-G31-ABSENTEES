@@ -32,7 +32,9 @@ slam_toolbox:
     min_laser_range: 0.0 #for rastering images
     max_laser_range: 3.4 #for rastering images (must stay below scan filler's 3.49 m)
     minimum_time_interval: 0.5
-    transform_timeout: 0.2
+    transform_timeout: 0.5 # was 0.2. map->odom is stamped (last scan time + this); while a
+                           # scan is being processed it goes stale and Nav2 reported
+                           # "Transform data too old" and aborted. 0.5 is slam_toolbox's default
     tf_buffer_duration: 30.
     stack_size_to_use: 40000000 #// program needs a larger stack size to serialize large maps
     enable_interactive_mode: true
@@ -40,8 +42,14 @@ slam_toolbox:
     # General Parameters
     use_scan_matching: true
     use_scan_barycenter: true
-    minimum_travel_distance: 0.5 # reduce from 0.5m so that we don't have to move as far for map to update
-    minimum_travel_heading: 0.5 # similar here. if either of the min travel conditions are met the slam will update map.
+    # slam_toolbox (Humble) only adds a scan once the robot has DRIVEN about
+    # 0.9 x minimum_travel_distance from where the last scan was added; turning
+    # on the spot never counts, whatever minimum_travel_heading says. At 0.5
+    # (0.45 m of driving) the map froze in a small arena: the explorer's hops
+    # were shorter than that. 0.2 caused aliasing (doubled walls) before, so
+    # 0.3 is the compromise; check the walls in a recorded run.
+    minimum_travel_distance: 0.3
+    minimum_travel_heading: 0.5
     scan_buffer_size: 10
     scan_buffer_maximum_scan_distance: 10.0
     link_match_minimum_response_fine: 0.1  

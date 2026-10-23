@@ -349,6 +349,7 @@ class FrontierSelector:
         max_gain_area: float = 12.0,
         turn_weight: float = 0.0,
         goal_offset: float = 0.0,
+        goal_heading: str = "frontier",
     ):
         self.min_cluster_size = min_cluster_size
         self.use_travel_distance = use_travel_distance
@@ -365,6 +366,12 @@ class FrontierSelector:
         self.turn_weight = turn_weight      # score per radian the robot must turn
         # m to pull the goal back from the frontier into known free space
         self.goal_offset = goal_offset
+        # "frontier": goal faces into the unknown area behind the frontier.
+        # "approach": goal faces the way the robot drives in, so it does not
+        # have to turn on the spot when it arrives.
+        if goal_heading not in ("frontier", "approach"):
+            raise ValueError("goal_heading must be 'frontier' or 'approach'.")
+        self.goal_heading = goal_heading
         self._history: deque = deque(maxlen=max_history)
 
     # ---- history: avoiding goals that were already visited -------------
@@ -595,10 +602,20 @@ class FrontierSelector:
                     result.unsafe_clusters += 1
                 continue
             goal_x, goal_y, dist = picked
-            yaw = self._frontier_facing_yaw(data, cluster)
-            goal_x, goal_y = self._pull_back(
-                grid, data, goal_x, goal_y, yaw, costmaps, is_blocked, travel
+            facing = self._frontier_facing_yaw(data, cluster)
+            pulled_x, pulled_y = self._pull_back(
+                grid, data, goal_x, goal_y, facing, costmaps, is_blocked, travel
             )
+            # The pull-back moves the goal towards the robot, so check the
+            # minimum goal distance again; tiny hops leave SLAM without new
+            # scans (slam_toolbox only adds one after ~0.9 x
+            # minimum_travel_distance of driving).
+            if math.hypot(pulled_x - robot_x, pulled_y - robot_y) >= self.min_goal_distance:
+                goal_x, goal_y = pulled_x, pulled_y
+            if self.goal_heading == "approach":
+                yaw = math.atan2(goal_y - robot_y, goal_x - robot_x)
+            else:
+                yaw = facing
 
             pose = PoseStamped()
             pose.header.frame_id = frame_id

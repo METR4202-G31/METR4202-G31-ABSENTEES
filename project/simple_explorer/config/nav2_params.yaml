@@ -143,7 +143,8 @@ controller_server:
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       required_movement_radius: 0.5
-      movement_time_allowance: 10.0
+      movement_time_allowance: 20.0      # G31: was 10.0. At 0.4 rad/s a turn-around alone
+                                         # takes ~8 s, which counted as "no progress"
     # Goal checker parameters
     #precise_goal_checker:
     #  plugin: "nav2_controller::SimpleGoalChecker"
@@ -155,9 +156,22 @@ controller_server:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.25
       yaw_goal_tolerance: 0.25
-    # DWB parameters
+    # G31: DWB wrapped in the Rotation Shim controller (part of Nav2 Humble).
+    # When a new path starts more than angular_dist_threshold away from the
+    # robot's heading, the shim first turns the robot on the spot to face it,
+    # then hands over to DWB. On its own DWB tries to "spiral out" instead,
+    # which in a small room or doorway drove the robot deeper in and got it
+    # stuck (Failed to make progress). The rotation is collision-checked; if
+    # it would hit something, control goes straight to DWB as before.
     FollowPath:
-      plugin: "dwb_core::DWBLocalPlanner"
+      plugin: "nav2_rotation_shim_controller::RotationShimController"
+      primary_controller: "dwb_core::DWBLocalPlanner"
+      angular_dist_threshold: 0.785      # rad (45 deg)
+      forward_sampling_distance: 0.5     # m along the path used to judge its heading
+      rotate_to_heading_angular_vel: 0.4 # rad/s, same limit as DWB (sharp scans/images)
+      max_angular_accel: 1.6
+      simulate_ahead_time: 1.0
+      # DWB parameters (used by the shim's primary controller)
       debug_trajectory_details: True
       min_vel_x: 0.0
       min_vel_y: 0.0
@@ -181,7 +195,8 @@ controller_server:
       sim_time: 1.7
       linear_granularity: 0.05
       angular_granularity: 0.025
-      transform_tolerance: 0.2
+      transform_tolerance: 0.5           # G31: was 0.2; SLAM's map->odom can lag while it
+                                         # processes a scan ("Transform data too old")
       xy_goal_tolerance: 0.25
       trans_stopped_velocity: 0.25
       short_circuit_trajectory_evaluation: True

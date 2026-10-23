@@ -56,6 +56,7 @@ from .frontier_selector import (
     FrontierCandidate,
     FrontierSelector,
     cell_to_world,
+    yaw_to_quaternion,
 )
 from .goal_outcome import decide, GoalDecision
 
@@ -97,6 +98,7 @@ class FrontierExplorer(Node):
             max_gain_area=p("max_gain_area").value,
             turn_weight=p("turn_weight").value,
             goal_offset=p("goal_offset").value,
+            goal_heading=p("goal_heading").value,
         )
         self._blacklist = GoalBlacklist(
             default_radius=p("blacklist_radius").value,
@@ -105,6 +107,12 @@ class FrontierExplorer(Node):
         # Goals the planner pre-check could not reach. Unlike the blacklist
         # these are forgotten as soon as the robot moves or spins.
         self._deferred = GoalBlacklist(default_radius=p("defer_radius").value)
+        # Areas where reaching a goal did not make the map grow. Skipped
+        # until the map grows again, so the robot cannot dither in one spot.
+        self._stale = GoalBlacklist(default_radius=p("stale_radius").value)
+        self._stale_streak = 0            # goals in a row without map growth
+        self._progress_pending = None     # goal waiting for its map-growth check
+        self._stuck_failures = 0          # failed goals in a row where the robot never moved
 
         self._map: Optional[OccupancyGrid] = None
         self._global_costmap: Optional[OccupancyGrid] = None
@@ -250,6 +258,13 @@ class FrontierExplorer(Node):
             "goal_offset": 0.0,
             "goal_timeout_base": 20.0,
             "goal_timeout_per_m": 6.0,
+            "goal_heading": "frontier",
+            "min_map_growth": 0.2,
+            "stale_radius": 0.75,
+            "progress_check_delay": 2.0,
+            "stale_warn_count": 2,
+            "stuck_move_threshold": 0.25,
+            "max_stuck_passes": 1,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -304,6 +319,9 @@ class FrontierExplorer(Node):
         else:
             self.get_logger().info("Resuming exploration.")
         self._deferred.clear()
+        self._stale.clear()
+        self._stale_streak = 0
+        self._progress_pending = None
         self._recoveries = 0
         self._empty_cycles = 0
         self._state = SELECTING
@@ -316,7 +334,55 @@ class FrontierExplorer(Node):
 
     def _is_blocked(self, x: float, y: float) -> bool:
         """Return True if (x, y) is blacklisted or deferred."""
-        return self._blacklist.is_blocked(x, y) or self._deferred.is_blocked(x, y)
+        return (
+            self._blacklist.is_blocked(x, y)
+            or self._deferred.is_blocked(x, y)
+            or self._stale.is_blocked(x, y)
+        )
+
+    def _known_area(self) -> float:
+        """Return the mapped (free or occupied) area of the SLAM map, in m^2."""
+        if self._map is None:
+            return 0.0
+        known = sum(1 for v in self._map.data if v >= 0)
+        return known * self._map.info.resolution ** 2
+
+    def _check_map_growth(self) -> bool:
+        """
+        After a goal was reached, check the map actually grew.
+
+        If it did not, the area around that goal is skipped until the map
+        grows again. This breaks the loop seen when SLAM stops adding scans
+        (slam_toolbox only adds a scan after the robot has *driven* about
+        0.9 x minimum_travel_distance; turning on the spot does not count):
+        the same frontier stays put and the robot hops back and forth at it.
+        Returns False while still waiting for SLAM to publish an update.
+        """
+        pending = self._progress_pending
+        if pending is None:
+            return True
+        if self._now() - pending["at"] < self.get_parameter("progress_check_delay").value:
+            return False
+        self._progress_pending = None
+        grown = self._known_area() - pending["known_before"]
+        if grown >= self.get_parameter("min_map_growth").value:
+            self._stale.clear()
+            self._stale_streak = 0
+            return True
+        self._stale.add(pending["x"], pending["y"], "no_map_growth")
+        self._stale_streak += 1
+        self.get_logger().info(
+            "Map grew only %.2f m2 after reaching (%.2f, %.2f); skipping that area "
+            "until the map changes." % (grown, pending["x"], pending["y"])
+        )
+        if self._stale_streak >= self.get_parameter("stale_warn_count").value:
+            self.get_logger().warn(
+                "Map has not grown after %d goals in a row. Is SLAM adding scans? "
+                "slam_toolbox only adds one after the robot drives about 0.9 x "
+                "minimum_travel_distance from the last; turning does not count."
+                % self._stale_streak
+            )
+        return True
 
     def _publish_status(self, status: str):
         self._status = status
@@ -406,6 +472,8 @@ class FrontierExplorer(Node):
             self._publish_status_if_changed(WAITING)
             return
         if not self._started and not self._startup_done():
+            return
+        if not self._check_map_growth():
             return
 
         result = self._selector.rank_candidates(
@@ -612,6 +680,8 @@ class FrontierExplorer(Node):
             return
         result = future.result()
         if result.status == GoalStatus.STATUS_SUCCEEDED and result.result.path.poses:
+            if self.get_parameter("goal_heading").value == "approach":
+                self._face_along_path(candidate, result.result.path.poses)
             self._send_goal(candidate)
             return
         self._reject(candidate, "no_path")
@@ -652,6 +722,42 @@ class FrontierExplorer(Node):
 
     # ---- sending and tracking goals ------------------------------------------
 
+    def _robot_xy(self):
+        """Return the robot's (x, y) in the map frame, or None if unknown."""
+        pose = self._robot_pose()
+        if pose is None:
+            return None
+        return pose.position.x, pose.position.y
+
+    def _robot_was_stuck(self, active) -> bool:
+        """True if the robot ended a goal less than stuck_move_threshold from its start."""
+        start, now = active.get("start"), self._robot_xy()
+        if start is None or now is None:
+            return False
+        moved = math.hypot(now[0] - start[0], now[1] - start[1])
+        return moved < self.get_parameter("stuck_move_threshold").value
+
+    @staticmethod
+    def _face_along_path(candidate: FrontierCandidate, poses, lookback: float = 0.3):
+        """
+        Point the goal the way the planned path arrives at it.
+
+        Nav2 still has to reach the goal heading (yaw_goal_tolerance), so a
+        goal facing the way the robot is already driving needs no turn on the
+        spot at the end. Uses the last `lookback` metres of the path, which
+        also works when the path bends round a wall.
+        """
+        end = candidate.pose.pose.position
+        for stamped in reversed(poses):
+            p = stamped.pose.position
+            if math.hypot(end.x - p.x, end.y - p.y) >= lookback:
+                yaw = math.atan2(end.y - p.y, end.x - p.x)
+                qx, qy, qz, qw = yaw_to_quaternion(yaw)
+                o = candidate.pose.pose.orientation
+                o.x, o.y, o.z, o.w = qx, qy, qz, qw
+                return
+        # Path shorter than lookback: keep the straight-line heading.
+
     def _send_goal(self, candidate: FrontierCandidate):
         pose = candidate.pose
         pose.header.stamp = self.get_clock().now().to_msg()
@@ -671,6 +777,8 @@ class FrontierExplorer(Node):
             "retries": 0,
             "deadline": self._now() + timeout if timeout > 0.0 else None,
             "timed_out": False,
+            "known_before": self._known_area(),
+            "start": self._robot_xy(),
         }
         self._republish_markers()
         self._state = NAVIGATING
@@ -730,6 +838,20 @@ class FrontierExplorer(Node):
             return
         if decision.mark_visited or decision.retry:
             self._selector.mark_visited(x, y)
+        if decision.blacklist and self._robot_was_stuck(active):
+            # The robot never left the spot it started from, so the goal is
+            # probably fine and the robot's position is the problem (e.g.
+            # wedged facing into a small room). Do not blacklist the goal the
+            # first time; blacklisting it used to cut off the only way out.
+            self._stuck_failures += 1
+            if self._stuck_failures <= self.get_parameter("max_stuck_passes").value:
+                self.get_logger().warn(
+                    "Goal (%.2f, %.2f) failed but the robot did not move; not "
+                    "blacklisting it this time." % (x, y)
+                )
+                decision = GoalDecision(mark_visited=False, blacklist=False)
+        else:
+            self._stuck_failures = 0
         if decision.blacklist:
             self._blacklist.add(x, y, "timeout" if active["timed_out"] else "result_%d" % code)
             self._remove_sent_goal(x, y)
@@ -738,6 +860,10 @@ class FrontierExplorer(Node):
         self._deferred.clear()
         if code == ManagedNavigate.Result.SUCCEEDED:
             self._recoveries = 0
+            self._progress_pending = {
+                "x": x, "y": y, "at": self._now(),
+                "known_before": active["known_before"],
+            }
         self._republish_markers()
 
         if self._state == IDLE:     # stopped while the goal was running
@@ -860,7 +986,7 @@ class FrontierExplorer(Node):
         deferred.scale.x = deferred.scale.y = deferred.scale.z = 0.2
         deferred.color.r = deferred.color.g = deferred.color.b = 0.0
         deferred.color.a = 1.0
-        for entry in self._deferred.entries():
+        for entry in list(self._deferred.entries()) + list(self._stale.entries()):
             deferred.points.append(Point(x=entry.x, y=entry.y, z=0.1))
         array.markers.append(deferred)
 

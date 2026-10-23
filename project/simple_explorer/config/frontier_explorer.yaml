@@ -55,7 +55,9 @@ frontier_explorer:
 
     # Startup and recovery
     startup_delay: 2.0           # s to wait after Nav2 and the map are up before the first goal
-    initial_spin: true           # turn on the spot once before the first goal
+    initial_spin: false          # turn on the spot once before the first goal. Off: SLAM
+                                 # ignores turning on the spot and the lidar sees 360 deg, so it
+                                 # only helps the camera, and costs ~16 s at 0.4 rad/s.
     spin_action: spin            # Nav2 behavior server action
     spin_angle: 6.28             # rad per spin (one full turn)
     spin_time_allowance: 20.0    # s
@@ -66,3 +68,17 @@ frontier_explorer:
                                  # free space (NavFn often fails on goals right at the edge)
     goal_timeout_base: 20.0      # s; a goal not reached within base + per_m * driving distance
     goal_timeout_per_m: 6.0      # s/m; is cancelled and blacklisted. Both 0 = no time limit.
+    goal_heading: approach       # approach: goal faces the way the planned path arrives, so no
+                                 # turn on the spot at the end. frontier: goal faces into the
+                                 # unknown area (old behaviour; better for the camera, more turning)
+
+    # Map-growth watchdog: after a goal is reached the map must grow, or the area
+    # around that goal is skipped until it does (stops dithering if SLAM stalls)
+    min_map_growth: 0.2          # m^2 of newly mapped area that counts as progress
+    stale_radius: 0.75           # m; area skipped around a goal that added nothing
+    progress_check_delay: 2.0    # s to wait for SLAM to publish before checking
+    stale_warn_count: 2          # goals in a row without growth before warning about SLAM
+
+    # A failed goal is not blacklisted if the robot never moved (it was stuck, not the goal)
+    stuck_move_threshold: 0.25   # m; moving less than this during a goal counts as stuck
+    max_stuck_passes: 1          # stuck failures in a row before blacklisting anyway
