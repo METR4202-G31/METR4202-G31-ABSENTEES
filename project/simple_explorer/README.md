@@ -30,11 +30,11 @@ not drive Nav2 itself.
    room it is in. If `precheck_path` is set, ask
    the Nav2 planner (`compute_path_to_pose`) whether a path exists. A goal with no
    path is blacklisted and published on `/explore/blacklist`.
-5. Publish the goal on `/explore` and send it to the supervisor's `ManagedNavigate`
+4. Publish the goal on `/explore` and send it to the supervisor's `ManagedNavigate`
    action. One outcome comes back per goal.
-6. If the frontier disappears after a map update the goal is cancelled and a new
+5. If the frontier disappears after a map update the goal is cancelled and a new
    one is chosen.
-7. When no cluster yields a goal for a few cycles the node publishes a `DONE_*`
+6. When no cluster yields a goal for a few cycles the node publishes a `DONE_*`
    status and stops sending goals.
 
 ## Blacklist

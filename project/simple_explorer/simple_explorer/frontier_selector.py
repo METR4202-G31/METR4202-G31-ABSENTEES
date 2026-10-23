@@ -322,12 +322,12 @@ class FrontierSelector:
 
     def __init__(
         self,
-        min_cluster_size: int = 20,
+        min_cluster_size: int = 8,
         min_goal_distance: float = 0.6,
         revisit_radius: float = 0.5,
         max_history: int = 20,
         distance_weight: float = 1.0,
-        size_weight: float = 0.1,
+        size_weight: float = 0.02,
         cost_limit: int = COSTMAP_COST_LIMIT,
         use_travel_distance: bool = True,
         travel_clearance: float = 0.15,

@@ -142,12 +142,12 @@ class FrontierExplorer(Node):
 
     def _declare_parameters(self):
         defaults = {
-            "min_cluster_size": 20,
+            "min_cluster_size": 8,
             "min_goal_distance": 0.6,
             "revisit_radius": 0.5,
             "max_history": 20,
             "distance_weight": 1.0,
-            "size_weight": 0.1,
+            "size_weight": 0.02,
             "cost_limit": 75,
             "use_travel_distance": True,
             "travel_clearance": 0.15,

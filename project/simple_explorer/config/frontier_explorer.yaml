@@ -12,8 +12,6 @@ frontier_explorer:
                                  # guide: the ring around an unmapped speck is long, a corridor
                                  # opening is short. Replaced by gain_weight below.
     cost_limit: 75               # Nav2 cost above which a goal is too close to an obstacle
-    use_travel_distance: true    # score by driving distance through known free space (false: straight line)
-    travel_clearance: 0.15       # m; walls are inflated by this for the driving-distance search
 
     # Information gain and turn penalty. For the original behaviour set gain_weight,
     # min_gain and turn_weight to 0.0, min_cluster_size to 20 and size_weight to 0.1.
