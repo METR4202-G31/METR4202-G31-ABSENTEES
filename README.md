@@ -69,9 +69,9 @@ export TURTLEBOT3_MODEL=waffle_pi
 ros2 launch test_worlds explore.launch.py \
     rows:=30 \
     cols:=30 \
-    cell_size:=0.75 \
-    features:="room:3,dead_end:2,narrow_passage:4,large_empty_space:1,l_corridor:3,wall_section:2,plus:2" \
-    seed:=42
+    cell_size:=0.3 \
+    features:="room:1,narrow_passage:1,large_empty_space:1,l_corridor:1,wall_section:1" \
+    seed:=20
 ```
 
 This generates a deterministic Gazebo world, places the TurtleBot3 and ArUco
