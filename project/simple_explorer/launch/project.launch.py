@@ -11,8 +11,14 @@ from launch_ros.actions import Node
 def generate_launch_description():
     """Launch the complete non-simulation project stack."""
     use_sim_time = LaunchConfiguration("use_sim_time")
+    rviz_config = LaunchConfiguration("rviz_config")
 
     simple_explorer_share = get_package_share_directory("simple_explorer")
+    default_rviz_config = os.path.join(
+        simple_explorer_share,
+        "rviz",
+        "full_project_stack.rviz",
+    )
 
     application_stack = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -22,7 +28,10 @@ def generate_launch_description():
                 "explore.launch.py",
             )
         ),
-        launch_arguments={"use_sim_time": use_sim_time}.items(),
+        launch_arguments={
+            "use_sim_time": use_sim_time,
+            "rviz_config": rviz_config,
+        }.items(),
     )
 
     navigation_supervisor = Node(
@@ -55,6 +64,11 @@ def generate_launch_description():
                 "use_sim_time",
                 default_value="false",
                 description="Use simulation time instead of the robot clock",
+            ),
+            DeclareLaunchArgument(
+                "rviz_config",
+                default_value=default_rviz_config,
+                description="Path to the RViz configuration file",
             ),
             navigation_supervisor,
             aruco_detector,

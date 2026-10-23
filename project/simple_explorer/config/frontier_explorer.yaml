@@ -50,6 +50,7 @@ frontier_explorer:
     empty_cycles_to_finish: 3    # consecutive empty selections before reporting DONE_*
     validity_check_period: 2.0   # s between "is the frontier still there" checks
     frontier_gone_radius: 1.0    # m
+    frontier_display_radius: 0.5 # m; minimum spacing between displayed frontier cells
     max_internal_retries: 2
 
     # Startup and recovery

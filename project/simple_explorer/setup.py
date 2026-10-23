@@ -37,6 +37,14 @@ setup(
             ),
             glob("config/*.yaml"),
         ),
+        (
+            os.path.join(
+                "share",
+                package_name,
+                "rviz",
+            ),
+            ["../full_project_stack.rviz"],
+        ),
     ],
     install_requires=[
         "setuptools",

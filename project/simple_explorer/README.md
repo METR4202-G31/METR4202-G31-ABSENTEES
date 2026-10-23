@@ -91,6 +91,14 @@ ros2 launch simple_explorer explore.launch.py
 ros2 launch simple_explorer project.launch.py use_sim_time:=true
 ```
 
+`project.launch.py` starts RViz with `project/full_project_stack.rviz`. To use
+a different configuration, override it with:
+
+```bash
+ros2 launch simple_explorer project.launch.py \
+  rviz_config:=/absolute/path/to/config.rviz
+```
+
 Until a `ManagedNavigate` server is running the explorer stays in `WAITING`.
 `project.launch.py` starts that server together with the explorer, as well as
 the ArUco detector and Mission Control. Use `use_sim_time:=false` (the default)

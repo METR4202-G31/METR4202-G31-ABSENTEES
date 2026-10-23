@@ -111,6 +111,8 @@ class FrontierExplorer(Node):
         self._frontiers: dict[int, Pose] = {}
         self._sent_goals: dict[int, Pose] = {}
         self._blacklisted_goals: dict[int, Pose] = {}
+        self._latest_clusters = []
+        self._latest_candidates = []
 
         self._state = SELECTING
         self._status = WAITING
@@ -177,8 +179,9 @@ class FrontierExplorer(Node):
             marker_type=Marker.SPHERE_LIST,
             scale_x=0.2,
             scale_y=0.2,
-            color=ColorRGBA(g=1.0, a=1.0),
+            color=ColorRGBA(r=0.5, g=0.5, b=0.5, a=1.0),
         )
+        self._current_goal_pub = self.create_publisher(Marker, "goal", 10)
         self._blacklist_coords_pub = CoordinatePublisher(
             node=self,
             coords_dict=self._blacklisted_goals,
@@ -201,6 +204,7 @@ class FrontierExplorer(Node):
 
         self._publish_status(WAITING)
         self.create_timer(1.0 / p("loop_rate_hz").value, self._tick)
+        self.create_timer(5.0, self._republish_markers)
         self.get_logger().info("Frontier explorer started.")
 
     def _declare_parameters(self):
@@ -233,6 +237,7 @@ class FrontierExplorer(Node):
             "empty_cycles_to_finish": 3,
             "validity_check_period": 2.0,
             "frontier_gone_radius": 1.0,
+            "frontier_display_radius": 0.5,
             "max_internal_retries": 2,
             "startup_delay": 2.0,
             "initial_spin": True,
@@ -663,6 +668,7 @@ class FrontierExplorer(Node):
             "deadline": self._now() + timeout if timeout > 0.0 else None,
             "timed_out": False,
         }
+        self._publish_current_goal_marker()
         self._state = NAVIGATING
         self._last_validity_check = self._now()
         self.get_logger().info(
@@ -710,6 +716,7 @@ class FrontierExplorer(Node):
             # "Failed to make progress" in a tight corner): give up on it.
             decision = GoalDecision(mark_visited=True, blacklist=True)
         self._active = None
+        self._publish_current_goal_marker()
 
         if decision.retry and active["retries"] < self.get_parameter("max_internal_retries").value:
             active["retries"] += 1
@@ -770,6 +777,8 @@ class FrontierExplorer(Node):
     def _publish_markers(self, clusters, candidates):
         if self._map is None:
             return
+        self._latest_clusters = clusters
+        self._latest_candidates = candidates
         stamp = self.get_clock().now().to_msg()
         frame = self.get_parameter("map_frame").value
         array = MarkerArray()
@@ -784,15 +793,42 @@ class FrontierExplorer(Node):
         frontier.color.r = 1.0
         frontier.color.g = 0.5
         frontier.color.a = 1.0
+        display_radius = self.get_parameter("frontier_display_radius").value
+        display_radius_squared = display_radius * display_radius
+        display_points = []
+        display_buckets = {}
         for cluster in clusters:
             for cx, cy in cluster:
                 x, y = cell_to_world(self._map, cx, cy)
-                pose = Pose()
-                pose.position.x = x
-                pose.position.y = y
-                pose.position.z = 0.05
-                self._frontiers[len(self._frontiers)] = pose
-                frontier.points.append(pose.position)
+                bucket_x = math.floor(x / display_radius)
+                bucket_y = math.floor(y / display_radius)
+                nearby = False
+                for neighbour_x in range(bucket_x - 1, bucket_x + 2):
+                    for neighbour_y in range(bucket_y - 1, bucket_y + 2):
+                        for selected_x, selected_y in display_buckets.get(
+                            (neighbour_x, neighbour_y), []
+                        ):
+                            dx = x - selected_x
+                            dy = y - selected_y
+                            if dx * dx + dy * dy < display_radius_squared:
+                                nearby = True
+                                break
+                        if nearby:
+                            break
+                    if nearby:
+                        break
+                if nearby:
+                    continue
+                display_buckets.setdefault((bucket_x, bucket_y), []).append((x, y))
+                display_points.append((x, y))
+
+        for x, y in display_points:
+            pose = Pose()
+            pose.position.x = x
+            pose.position.y = y
+            pose.position.z = 0.05
+            self._frontiers[len(self._frontiers)] = pose
+            frontier.points.append(pose.position)
         self._frontier_coords_pub.publish_coordinates()
         array.markers.append(frontier)
 
@@ -830,6 +866,27 @@ class FrontierExplorer(Node):
             goal.points.append(candidate.pose.pose.position)
             array.markers.append(goal)
         self._marker_pub.publish(array)
+
+    def _republish_markers(self):
+        if self._map is not None:
+            self._publish_markers(self._latest_clusters, self._latest_candidates)
+        self._goal_coords_pub.publish_coordinates()
+        self._publish_current_goal_marker()
+
+    def _publish_current_goal_marker(self):
+        marker = Marker()
+        marker.header.frame_id = self.get_parameter("map_frame").value
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "current goal"
+        marker.id = 0
+        marker.type = Marker.SPHERE_LIST
+        marker.action = Marker.ADD if self._active is not None else Marker.DELETE
+        marker.scale.x = marker.scale.y = marker.scale.z = 0.3
+        marker.color.g = 1.0
+        marker.color.a = 1.0
+        if self._active is not None:
+            marker.points.append(self._active["candidate"].pose.pose.position)
+        self._current_goal_pub.publish(marker)
 
     def _publish_blacklist_markers(self):
         self._blacklisted_goals.clear()
