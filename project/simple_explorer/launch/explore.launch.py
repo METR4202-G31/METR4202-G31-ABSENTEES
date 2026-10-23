@@ -15,6 +15,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
+    rviz_config = LaunchConfiguration("rviz_config")
 
     nav2_bringup_dir = get_package_share_directory("nav2_bringup")
     slam_toolbox_dir = get_package_share_directory("slam_toolbox")
@@ -72,7 +73,7 @@ def generate_launch_description():
         }.items(),
     )
 
-    rviz_config = os.path.join(
+    default_rviz_config = os.path.join(
         nav2_bringup_dir,
         "rviz",
         "nav2_default_view.rviz",
@@ -117,6 +118,11 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                "rviz_config",
+                default_value=default_rviz_config,
+                description="Path to the RViz configuration file",
+            ),
             DeclareLaunchArgument(
                 "use_sim_time",
                 default_value="true",
