@@ -31,11 +31,12 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, ColorRGBA, String
 from tf2_ros import Buffer, TransformException, TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 
 from .blacklist import GoalBlacklist
+from .CoordinatePublisher import CoordinatePublisher
 from .frontier_selector import (
     CostmapLayer,
     frontier_near,
@@ -90,6 +91,9 @@ class FrontierExplorer(Node):
         self._map: Optional[OccupancyGrid] = None
         self._global_costmap: Optional[OccupancyGrid] = None
         self._local_costmap: Optional[OccupancyGrid] = None
+        self._frontiers: dict[int, Pose] = {}
+        self._sent_goals: dict[int, Pose] = {}
+        self._blacklisted_goals: dict[int, Pose] = {}
 
         self._state = SELECTING
         self._status = WAITING
@@ -128,6 +132,39 @@ class FrontierExplorer(Node):
         self._reject_pub = self.create_publisher(PoseStamped, "/explore/blacklist", 10)
         self._status_pub = self.create_publisher(String, "/explore/status", latched)
         self._marker_pub = self.create_publisher(MarkerArray, "/explore/frontiers", 1)
+        self._frontier_coords_pub = CoordinatePublisher(
+            node=self,
+            coords_dict=self._frontiers,
+            topic="frontier",
+            namespace="detected frontiers",
+            frame_id=p("map_frame").value,
+            marker_type=Marker.SPHERE_LIST,
+            scale_x=0.1,
+            scale_y=0.1,
+            color=ColorRGBA(r=1.0, g=0.5, b=0.0, a=1.0),
+        )
+        self._goal_coords_pub = CoordinatePublisher(
+            node=self,
+            coords_dict=self._sent_goals,
+            topic="goal",
+            namespace="sent goals",
+            frame_id=p("map_frame").value,
+            marker_type=Marker.SPHERE_LIST,
+            scale_x=0.2,
+            scale_y=0.2,
+            color=ColorRGBA(g=1.0, a=1.0),
+        )
+        self._blacklist_coords_pub = CoordinatePublisher(
+            node=self,
+            coords_dict=self._blacklisted_goals,
+            topic="blacklist",
+            namespace="blacklisted goals",
+            frame_id=p("map_frame").value,
+            marker_type=Marker.SPHERE_LIST,
+            scale_x=0.2,
+            scale_y=0.2,
+            color=ColorRGBA(a=1.0),
+        )
 
         self._nav_client = ActionClient(
             self, ManagedNavigate, p("managed_navigate_action").value
@@ -188,6 +225,7 @@ class FrontierExplorer(Node):
 
     def _on_failed_regions(self, msg):
         self._blacklist.update_from_failed_regions(msg)
+        self._publish_blacklist_markers()
 
     def _on_resume(self, msg):
         if not msg.data:
@@ -216,6 +254,7 @@ class FrontierExplorer(Node):
             self.get_logger().info("Resuming after completion: retrying blacklisted goals.")
             self._blacklist.clear()
             self._blacklist.forget_external()
+            self._publish_blacklist_markers()
             self._selector.clear_history()
             self._done_status = None
         else:
@@ -415,6 +454,7 @@ class FrontierExplorer(Node):
         x, y = pose.pose.position.x, pose.pose.position.y
         self.get_logger().info("Rejected goal (%.2f, %.2f): %s" % (x, y, reason))
         self._blacklist.add(x, y, reason)
+        self._publish_blacklist_markers()
         self._selector.mark_visited(x, y)
         pose.header.stamp = self.get_clock().now().to_msg()
         self._reject_pub.publish(pose)
@@ -425,6 +465,10 @@ class FrontierExplorer(Node):
         pose = candidate.pose
         pose.header.stamp = self.get_clock().now().to_msg()
         self._goal_pub.publish(pose)
+        goal_pose = Pose()
+        goal_pose.position = pose.pose.position
+        self._sent_goals[len(self._sent_goals)] = goal_pose
+        self._goal_coords_pub.publish_coordinates()
 
         goal = ManagedNavigate.Goal()
         goal.target_pose = pose
@@ -488,6 +532,7 @@ class FrontierExplorer(Node):
             self._selector.mark_visited(x, y)
         if decision.blacklist:
             self._blacklist.add(x, y, "result_%d" % code)
+            self._publish_blacklist_markers()
 
         if self._state == IDLE:     # stopped while the goal was running
             return
@@ -527,41 +572,61 @@ class FrontierExplorer(Node):
         frame = self.get_parameter("map_frame").value
         array = MarkerArray()
 
+        self._frontiers.clear()
         frontier = Marker()
         frontier.header.frame_id = frame
         frontier.header.stamp = stamp
         frontier.ns = "frontier_cells"
-        frontier.type = Marker.POINTS
-        frontier.scale.x = frontier.scale.y = 0.06
-        frontier.color.r, frontier.color.g, frontier.color.a = 1.0, 0.8, 1.0
+        frontier.type = Marker.SPHERE_LIST
+        frontier.scale.x = frontier.scale.y = frontier.scale.z = 0.1
+        frontier.color.r = 1.0
+        frontier.color.g = 0.5
+        frontier.color.a = 1.0
         for cluster in clusters:
             for cx, cy in cluster:
                 x, y = cell_to_world(self._map, cx, cy)
-                frontier.points.append(Point(x=x, y=y, z=0.05))
+                pose = Pose()
+                pose.position.x = x
+                pose.position.y = y
+                pose.position.z = 0.05
+                self._frontiers[len(self._frontiers)] = pose
+                frontier.points.append(pose.position)
+        self._frontier_coords_pub.publish_coordinates()
         array.markers.append(frontier)
 
+        self._publish_blacklist_markers()
         blocked = Marker()
         blocked.header.frame_id = frame
         blocked.header.stamp = stamp
         blocked.ns = "blacklist"
         blocked.type = Marker.SPHERE_LIST
         blocked.scale.x = blocked.scale.y = blocked.scale.z = 0.3
-        blocked.color.r, blocked.color.a = 1.0, 0.6
+        blocked.color.a = 1.0
         for entry in self._blacklist.entries():
             blocked.points.append(Point(x=entry.x, y=entry.y, z=0.1))
         array.markers.append(blocked)
 
         for candidate in candidates:
-            arrow = Marker()
-            arrow.header.frame_id = frame
-            arrow.header.stamp = stamp
-            arrow.ns = "next_goal"
-            arrow.type = Marker.ARROW
-            arrow.pose = candidate.pose.pose
-            arrow.scale.x, arrow.scale.y, arrow.scale.z = 0.5, 0.1, 0.1
-            arrow.color.g, arrow.color.a = 1.0, 1.0
-            array.markers.append(arrow)
+            goal = Marker()
+            goal.header.frame_id = frame
+            goal.header.stamp = stamp
+            goal.ns = "next_goal"
+            goal.type = Marker.SPHERE_LIST
+            goal.scale.x = goal.scale.y = goal.scale.z = 0.2
+            goal.color.g, goal.color.a = 1.0, 1.0
+            goal.points.append(candidate.pose.pose.position)
+            array.markers.append(goal)
         self._marker_pub.publish(array)
+
+    def _publish_blacklist_markers(self):
+        self._blacklisted_goals.clear()
+        for index, entry in enumerate(self._blacklist.entries()):
+            pose = Pose()
+            pose.position.x = entry.x
+            pose.position.y = entry.y
+            pose.position.z = 0.1
+            self._blacklisted_goals[index] = pose
+        self._blacklist_coords_pub.publish_coordinates()
 
 
 def main(args=None):

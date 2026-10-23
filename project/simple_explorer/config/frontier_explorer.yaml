@@ -23,7 +23,7 @@ frontier_explorer:
     turn_weight: 0.5             # score per radian of turning: going straight back costs ~1.6 m
 
     # Blacklist
-    blacklist_radius: 0.5        # m; circle around goals the explorer rejects itself
+    blacklist_radius: 0.1        # m; circle around goals the explorer rejects itself
     min_failure_count: 1         # supervisor failed regions with fewer failures are ignored
 
     # Frames

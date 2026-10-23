@@ -59,6 +59,9 @@ decided here.
 | pub | `/explore` | `geometry_msgs/PoseStamped` | every goal sent, just a pose in `map` |
 | pub | `/explore/blacklist` | `geometry_msgs/PoseStamped` | every goal the explorer rejected itself |
 | pub | `/explore/status` | `std_msgs/String` | `WAITING`, `EXPLORING`, `STOPPED`, `DONE_NO_FRONTIERS`, `DONE_BLACKLISTED_REMAIN` (transient-local) |
+| pub | `frontier` | `visualization_msgs/Marker` | all detected frontier cells as small orange RViz circles |
+| pub | `goal` | `visualization_msgs/Marker` | all sent goals as green RViz circles |
+| pub | `blacklist` | `visualization_msgs/Marker` | all blacklisted goals as black RViz circles |
 | pub | `/explore/frontiers` | `visualization_msgs/MarkerArray` | frontier cells, next goal, blacklist (for RViz) |
 | action client | `managed_navigate` | `navigation_interfaces/ManagedNavigate` | needs the supervisor's action server |
 | action client | `compute_path_to_pose` | `nav2_msgs/ComputePathToPose` | optional goal pre-check |
