@@ -13,7 +13,8 @@ Publishes:
   /explore/blacklist  (PoseStamped) every goal the explorer rejected itself
   /explore/status     (String) WAITING, EXPLORING, STOPPED,
                       DONE_NO_FRONTIERS or DONE_BLACKLISTED_REMAIN
-  /explore/frontiers  (MarkerArray) frontier cells, current goal, blacklist
+  /explore/frontiers  (MarkerArray) frontier cells, current goal, past goals,
+                      blacklist and deferred goals
 Action clients:
   managed_navigate (navigation_interfaces/ManagedNavigate), compute_path_to_pose (Nav2),
   spin (Nav2 behavior server)
@@ -643,9 +644,11 @@ class FrontierExplorer(Node):
         pose = candidate.pose
         x, y = pose.pose.position.x, pose.pose.position.y
         self.get_logger().info("Deferred goal (%.2f, %.2f): %s" % (x, y, reason))
+        self._remove_sent_goal(x, y)
         self._deferred.add(x, y, reason)
         pose.header.stamp = self.get_clock().now().to_msg()
         self._reject_pub.publish(pose)
+        self._republish_markers()
 
     # ---- sending and tracking goals ------------------------------------------
 
@@ -653,6 +656,7 @@ class FrontierExplorer(Node):
         pose = candidate.pose
         pose.header.stamp = self.get_clock().now().to_msg()
         self._goal_pub.publish(pose)
+        self._sent_goals[len(self._sent_goals)] = pose.pose
         self._precheck_failures = 0
 
         goal = ManagedNavigate.Goal()
@@ -668,7 +672,7 @@ class FrontierExplorer(Node):
             "deadline": self._now() + timeout if timeout > 0.0 else None,
             "timed_out": False,
         }
-        self._publish_current_goal_marker()
+        self._republish_markers()
         self._state = NAVIGATING
         self._last_validity_check = self._now()
         self.get_logger().info(
@@ -728,11 +732,13 @@ class FrontierExplorer(Node):
             self._selector.mark_visited(x, y)
         if decision.blacklist:
             self._blacklist.add(x, y, "timeout" if active["timed_out"] else "result_%d" % code)
+            self._remove_sent_goal(x, y)
         # The robot has (probably) moved, so the map changed: give deferred
         # goals another chance, and a reached goal counts as progress.
         self._deferred.clear()
         if code == ManagedNavigate.Result.SUCCEEDED:
             self._recoveries = 0
+        self._republish_markers()
 
         if self._state == IDLE:     # stopped while the goal was running
             return
@@ -837,6 +843,7 @@ class FrontierExplorer(Node):
         blocked.header.frame_id = frame
         blocked.header.stamp = stamp
         blocked.ns = "blacklist"
+        blocked.id = 1
         blocked.type = Marker.SPHERE_LIST
         blocked.scale.x = blocked.scale.y = blocked.scale.z = 0.3
         blocked.color.a = 1.0
@@ -848,18 +855,46 @@ class FrontierExplorer(Node):
         deferred.header.frame_id = frame
         deferred.header.stamp = stamp
         deferred.ns = "deferred"
+        deferred.id = 2
         deferred.type = Marker.SPHERE_LIST
         deferred.scale.x = deferred.scale.y = deferred.scale.z = 0.2
-        deferred.color.r, deferred.color.g, deferred.color.a = 1.0, 0.6, 0.6
+        deferred.color.r = deferred.color.g = deferred.color.b = 0.0
+        deferred.color.a = 1.0
         for entry in self._deferred.entries():
             deferred.points.append(Point(x=entry.x, y=entry.y, z=0.1))
         array.markers.append(deferred)
+
+        past = Marker()
+        past.header.frame_id = frame
+        past.header.stamp = stamp
+        past.ns = "past_goals"
+        past.id = 3
+        past.type = Marker.SPHERE_LIST
+        past.scale.x = past.scale.y = past.scale.z = 0.2
+        past.color.r = past.color.g = past.color.b = 0.5
+        past.color.a = 1.0
+        active_position = None
+        if self._active is not None:
+            active_position = self._active["candidate"].pose.pose.position
+        for pose in self._sent_goals.values():
+            if active_position is not None and (
+                math.hypot(
+                    pose.position.x - active_position.x,
+                    pose.position.y - active_position.y,
+                ) < 1e-6
+            ):
+                continue
+            if self._is_blocked(pose.position.x, pose.position.y):
+                continue
+            past.points.append(pose.position)
+        array.markers.append(past)
 
         for candidate in candidates:
             goal = Marker()
             goal.header.frame_id = frame
             goal.header.stamp = stamp
             goal.ns = "next_goal"
+            goal.id = 4
             goal.type = Marker.SPHERE_LIST
             goal.scale.x = goal.scale.y = goal.scale.z = 0.2
             goal.color.g, goal.color.a = 1.0, 1.0
@@ -897,6 +932,16 @@ class FrontierExplorer(Node):
             pose.position.z = 0.1
             self._blacklisted_goals[index] = pose
         self._blacklist_coords_pub.publish_coordinates()
+
+    def _remove_sent_goal(self, x: float, y: float):
+        """Remove sent goals covered by a deferred or blacklisted location."""
+        radius = max(
+            self.get_parameter("blacklist_radius").value,
+            self.get_parameter("defer_radius").value,
+        )
+        for index, pose in tuple(self._sent_goals.items()):
+            if math.hypot(pose.position.x - x, pose.position.y - y) <= radius:
+                del self._sent_goals[index]
 
 
 def main(args=None):
