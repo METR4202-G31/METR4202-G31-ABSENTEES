@@ -14,6 +14,10 @@ class ArucoDetector(Node):
     def __init__(self):
         super().__init__('aruco_detector')
 
+        self.distance_scale = (
+            1.0 if self.get_parameter('use_sim_time').value else 2.26
+        )
+
         #CvBridge allows for easy conversion between camera msg format into raw arrays for opencv
         self.bridge = CvBridge() 
         
@@ -93,9 +97,9 @@ class ArucoDetector(Node):
     def build_pose(self, tvec, rvec) -> Pose:
         pose = Pose()
 
-        pose.position.x = float(tvec[0]) * 2.26 # improves performance in tests
-        pose.position.y = float(tvec[1]) * 2.26
-        pose.position.z = float(tvec[2]) * 2.26
+        pose.position.x = float(tvec[0]) * self.distance_scale
+        pose.position.y = float(tvec[1]) * self.distance_scale
+        pose.position.z = float(tvec[2]) * self.distance_scale
 
         rot = Rotation.from_rotvec(rvec)
         quat = rot.as_quat()  # returns [x, y, z, w]

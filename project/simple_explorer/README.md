@@ -31,7 +31,8 @@ not drive Nav2 itself.
    the Nav2 planner (`compute_path_to_pose`) whether a path exists. A goal with no
    path is blacklisted and published on `/explore/blacklist`.
 4. Publish the goal on `/explore` and send it to the supervisor's `ManagedNavigate`
-   action. One outcome comes back per goal.
+   action. One outcome comes back per goal. Sent goals remain visible as grey
+   markers unless they are the current goal, deferred, or blacklisted.
 5. If the frontier disappears after a map update the goal is cancelled and a new
    one is chosen.
 6. When no cluster yields a goal for a few cycles the node publishes a `DONE_*`
@@ -60,9 +61,9 @@ decided here.
 | pub | `/explore/blacklist` | `geometry_msgs/PoseStamped` | every goal the explorer rejected itself |
 | pub | `/explore/status` | `std_msgs/String` | `WAITING`, `EXPLORING`, `STOPPED`, `DONE_NO_FRONTIERS`, `DONE_BLACKLISTED_REMAIN` (transient-local) |
 | pub | `frontier` | `visualization_msgs/Marker` | all detected frontier cells as small orange RViz circles |
-| pub | `goal` | `visualization_msgs/Marker` | all sent goals as green RViz circles |
+| pub | `goal` | `visualization_msgs/Marker` | past sent goals as grey RViz circles |
 | pub | `blacklist` | `visualization_msgs/Marker` | all blacklisted goals as black RViz circles |
-| pub | `/explore/frontiers` | `visualization_msgs/MarkerArray` | frontier cells, next goal, blacklist (for RViz) |
+| pub | `/explore/frontiers` | `visualization_msgs/MarkerArray` | orange frontier cells, green current/next goal, grey past goals, and black deferred/blacklisted goals (for RViz) |
 | action client | `managed_navigate` | `navigation_interfaces/ManagedNavigate` | needs the supervisor's action server |
 | action client | `compute_path_to_pose` | `nav2_msgs/ComputePathToPose` | optional goal pre-check |
 
@@ -89,6 +90,14 @@ ros2 launch simple_explorer explore.launch.py
 
 # Complete project stack, when simulation or robot bringup is already running
 ros2 launch simple_explorer project.launch.py use_sim_time:=true
+```
+
+`project.launch.py` starts RViz with `project/full_project_stack.rviz`. To use
+a different configuration, override it with:
+
+```bash
+ros2 launch simple_explorer project.launch.py \
+  rviz_config:=/absolute/path/to/config.rviz
 ```
 
 Until a `ManagedNavigate` server is running the explorer stays in `WAITING`.

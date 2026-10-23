@@ -1,15 +1,21 @@
 frontier_explorer:
   ros__parameters:
     # Frontier detection and scoring
-    min_cluster_size: 20         # cells; smaller frontiers are noise
-    min_goal_distance: 0.1       # m; never pick a goal closer to the robot than this
-    revisit_radius: 0.1          # m; do not re-pick goals near recently visited ones
+    min_cluster_size: 10         # cells (0.5 m at 0.05 m/cell). Was 20, which silently dropped the
+                                 # frontier across a 0.65 m corridor (~13 cells). Specks are now
+                                 # filtered by min_gain instead.
+    min_goal_distance: 0.6       # m; never pick a goal closer to the robot than this
+    revisit_radius: 0.25          # m; do not re-pick goals near recently visited ones
     max_history: 20
     distance_weight: 1.0         # score per metre of driving distance
     size_weight: 0.0             # score per frontier cell. Was 0.1, but frontier length is a poor
                                  # guide: the ring around an unmapped speck is long, a corridor
                                  # opening is short. Replaced by gain_weight below.
     cost_limit: 75               # Nav2 cost above which a goal is too close to an obstacle
+    travel_clearance: 0.18       # m; walls are grown by this when judging reachability.
+                                 # Keep equal to robot_radius in nav2_params.yaml: it was
+                                 # 0.15 against Nav2's 0.22, so the explorer kept picking
+                                 # frontiers the planner then refused.
 
     # Information gain and turn penalty. For the original behaviour set gain_weight,
     # min_gain and turn_weight to 0.0, min_cluster_size to 20 and size_weight to 0.1.
@@ -20,8 +26,10 @@ frontier_explorer:
                                  # and distance/turning decide between them (no cross-map trips)
     turn_weight: 0.5             # score per radian of turning: going straight back costs ~1.6 m
 
-    # Blacklist
-    blacklist_radius: 0.1        # m; circle around goals the explorer rejects itself
+    # Blacklist (goals Nav2 actually failed to reach) and deferred goals
+    blacklist_radius: 0.25        # m; circle around goals that failed in Nav2
+    defer_radius: 0.3            # m; circle around goals the planner pre-check refused.
+                                 # Deferred goals are retried after the robot moves or spins.
     min_failure_count: 1         # supervisor failed regions with fewer failures are ignored
 
     # Frames
@@ -32,7 +40,8 @@ frontier_explorer:
     managed_navigate_action: managed_navigate
     compute_path_action: compute_path_to_pose
     precheck_path: true          # ask the planner for a path before sending a goal
-    max_prechecks: 5             # candidates checked per selection cycle
+    max_prechecks: 5             # planner pre-check failures in a row before pausing settle_time;
+                                 # after each failure the frontiers are re-ranked
     precheck_timeout: 3.0        # s
 
     # Loop behaviour
@@ -41,4 +50,19 @@ frontier_explorer:
     empty_cycles_to_finish: 3    # consecutive empty selections before reporting DONE_*
     validity_check_period: 2.0   # s between "is the frontier still there" checks
     frontier_gone_radius: 1.0    # m
+    frontier_display_radius: 0.5 # m; minimum spacing between displayed frontier cells
     max_internal_retries: 2
+
+    # Startup and recovery
+    startup_delay: 2.0           # s to wait after Nav2 and the map are up before the first goal
+    initial_spin: true           # turn on the spot once before the first goal
+    spin_action: spin            # Nav2 behavior server action
+    spin_angle: 6.28             # rad per spin (one full turn)
+    spin_time_allowance: 20.0    # s
+    max_recoveries: 2            # spins in a row with no reachable frontier before DONE_*
+
+    # Goal placement and time limit
+    goal_offset: 0.25            # m; goals sit this far back from the frontier edge, in known
+                                 # free space (NavFn often fails on goals right at the edge)
+    goal_timeout_base: 20.0      # s; a goal not reached within base + per_m * driving distance
+    goal_timeout_per_m: 6.0      # s/m; is cancelled and blacklisted. Both 0 = no time limit.

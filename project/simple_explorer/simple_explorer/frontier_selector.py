@@ -30,17 +30,6 @@ Optional scoring terms (all off by default, switched on in the YAML config):
     than frontiers roughly ahead of it, so it finishes the corridor or room
     it is in before going back.
 
-Optional scoring terms (all off by default, switched on in the YAML config):
-  - information gain: how much unknown space actually lies behind a
-    frontier, found by flood-filling into the unknown cells next to it.
-    A small unmapped speck in the middle of a mapped room is enclosed by
-    free cells, so its flood fill stops almost immediately and its gain is
-    tiny, while a corridor leading into unexplored space has a large gain.
-    Clusters below min_gain are ignored.
-  - turn penalty: frontiers that need the robot to turn around cost more
-    than frontiers roughly ahead of it, so it finishes the corridor or room
-    it is in before going back.
-
 Exploration is finished when no cluster yields a goal. The result records
 whether clusters were dropped because of the blacklist, so the caller can
 tell "nothing left" from "only blacklisted frontiers left".
@@ -315,6 +304,7 @@ class FrontierCandidate:
     score: float
     cluster_size: int
     gain: float = 0.0   # m^2 of unknown space behind the frontier (0 if unused)
+    distance: float = 0.0   # m the robot drives to get there (straight line if unknown)
 
 
 @dataclass
@@ -326,6 +316,17 @@ class SelectionResult:
     blocked_clusters: int = 0
     unreachable_clusters: int = 0
     low_gain_clusters: int = 0
+    unsafe_clusters: int = 0     # every reachable cell too close to an obstacle
+
+    def summary(self) -> str:
+        """One line explaining what happened to every cluster, for the log."""
+        return (
+            "%d frontier cluster(s): %d candidate(s), %d blocked, %d unreachable, "
+            "%d unsafe, %d low gain" % (
+                len(self.clusters), len(self.candidates), self.blocked_clusters,
+                self.unreachable_clusters, self.unsafe_clusters, self.low_gain_clusters,
+            )
+        )
 
 
 class FrontierSelector:
@@ -347,6 +348,7 @@ class FrontierSelector:
         gain_radius: float = 3.0,
         max_gain_area: float = 12.0,
         turn_weight: float = 0.0,
+        goal_offset: float = 0.0,
     ):
         self.min_cluster_size = min_cluster_size
         self.use_travel_distance = use_travel_distance
@@ -361,6 +363,8 @@ class FrontierSelector:
         self.gain_radius = gain_radius      # m; how far the flood fill reaches
         self.max_gain_area = max_gain_area  # m^2; cap so one frontier cannot dominate
         self.turn_weight = turn_weight      # score per radian the robot must turn
+        # m to pull the goal back from the frontier into known free space
+        self.goal_offset = goal_offset
         self._history: deque = deque(maxlen=max_history)
 
     # ---- history: avoiding goals that were already visited -------------
@@ -460,17 +464,19 @@ class FrontierSelector:
         costmaps: Sequence[CostmapLayer],
         is_blocked: Optional[Callable[[float, float], bool]],
         travel: Optional[TravelMap],
-    ) -> Tuple[Optional[Tuple[float, float, float]], bool, bool]:
+    ) -> Tuple[Optional[Tuple[float, float, float]], bool, bool, bool]:
         """
         Pick the goal cell for a cluster.
 
-        Returns ((x, y, driving distance) or None, blocked, unreachable):
+        Returns ((x, y, driving distance) or None, blocked, unreachable, unsafe):
         blocked says a cell was rejected because of the blacklist,
-        unreachable that a cell was rejected because no drive reaches it.
+        unreachable that a cell was rejected because no drive reaches it,
+        unsafe that a cell was rejected because it is too close to an obstacle.
         """
         cen_x, cen_y = self._cluster_centroid(cluster)
         blocked = False
         unreachable = False
+        unsafe = False
         for cell in sorted(
             cluster, key=lambda c: math.hypot(c[0] - cen_x, c[1] - cen_y)
         ):
@@ -490,9 +496,49 @@ class FrontierSelector:
                     unreachable = True
                     continue
             if not all(m.is_safe(x, y, self.cost_limit) for m in costmaps):
+                unsafe = True
                 continue
-            return (x, y, dist), blocked, unreachable
-        return None, blocked, unreachable
+            return (x, y, dist), blocked, unreachable, unsafe
+        return None, blocked, unreachable, unsafe
+
+    def _pull_back(
+        self,
+        grid: OccupancyGrid,
+        data: np.ndarray,
+        x: float,
+        y: float,
+        yaw: float,
+        costmaps: Sequence[CostmapLayer],
+        is_blocked: Optional[Callable[[float, float], bool]],
+        travel: Optional[TravelMap],
+    ) -> Tuple[float, float]:
+        """
+        Move a goal goal_offset metres back from the frontier, away from yaw.
+
+        A goal on the very edge of the known map sits next to unknown cells,
+        where NavFn sometimes fails ("Failed to create a plan from potential")
+        and every nearby cell then fails the same way. A point a little way
+        back in known free space plans reliably and the robot still sees the
+        unknown area from there. Falls back to the frontier cell itself if the
+        pulled-back point is not free, safe, unblocked and reachable.
+        """
+        if self.goal_offset <= 0.0:
+            return x, y
+        px = x - self.goal_offset * math.cos(yaw)
+        py = y - self.goal_offset * math.sin(yaw)
+        cx, cy = world_to_cell(grid, px, py)
+        height, width = data.shape
+        if not _in_bounds(cx, cy, width, height):
+            return x, y
+        if not 0 <= data[cy, cx] <= FREE_MAX:
+            return x, y
+        if is_blocked is not None and is_blocked(px, py):
+            return x, y
+        if travel is not None and math.isinf(travel.distance(cx, cy)):
+            return x, y
+        if not all(m.is_safe(px, py, self.cost_limit) for m in costmaps):
+            return x, y
+        return px, py
 
     def rank_candidates(
         self,
@@ -537,7 +583,7 @@ class FrontierSelector:
                     result.low_gain_clusters += 1
                     continue
 
-            picked, blocked, unreachable = self._pick_goal_cell(
+            picked, blocked, unreachable, unsafe = self._pick_goal_cell(
                 grid, cluster, robot_x, robot_y, costmaps, is_blocked, travel
             )
             if picked is None:
@@ -545,14 +591,19 @@ class FrontierSelector:
                     result.blocked_clusters += 1
                 elif unreachable:
                     result.unreachable_clusters += 1
+                elif unsafe:
+                    result.unsafe_clusters += 1
                 continue
             goal_x, goal_y, dist = picked
+            yaw = self._frontier_facing_yaw(data, cluster)
+            goal_x, goal_y = self._pull_back(
+                grid, data, goal_x, goal_y, yaw, costmaps, is_blocked, travel
+            )
 
             pose = PoseStamped()
             pose.header.frame_id = frame_id
             pose.pose.position.x = goal_x
             pose.pose.position.y = goal_y
-            yaw = self._frontier_facing_yaw(data, cluster)
             qx, qy, qz, qw = yaw_to_quaternion(yaw)
             pose.pose.orientation.x = qx
             pose.pose.orientation.y = qy
@@ -570,6 +621,7 @@ class FrontierSelector:
                     score=self._score(dist, len(cluster), gain, turn),
                     cluster_size=len(cluster),
                     gain=gain,
+                    distance=dist,
                 )
             )
 
