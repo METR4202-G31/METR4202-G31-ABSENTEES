@@ -37,6 +37,7 @@ class MissionControl(Node):
 
         #prints all detected markers every 5 seconds
         self._debug_timer = self.create_timer(5.0, self.print_markers)
+        self._marker_timer = self.create_timer(5.0, self._republish_markers)
         
         self.get_logger().info('Mission Control node started.')
         
@@ -51,6 +52,9 @@ class MissionControl(Node):
         for marker_id, pose in self._markers.items():
             self.get_logger().info(
             f"Marker {marker_id} at Global (X: {pose.position.x:.2f}, Y: {pose.position.y:.2f})")
+
+    def _republish_markers(self):
+        self._coords_pub.publish_coordinates()
 
     
     def __dist(self, pos: Point) -> float:
