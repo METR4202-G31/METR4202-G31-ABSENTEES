@@ -55,7 +55,7 @@ from .frontier_selector import (
     FrontierSelector,
     cell_to_world,
 )
-from .goal_outcome import decide
+from .goal_outcome import decide, GoalDecision
 
 WAITING = "WAITING"
 EXPLORING = "EXPLORING"
@@ -94,6 +94,7 @@ class FrontierExplorer(Node):
             gain_radius=p("gain_radius").value,
             max_gain_area=p("max_gain_area").value,
             turn_weight=p("turn_weight").value,
+            goal_offset=p("goal_offset").value,
         )
         self._blacklist = GoalBlacklist(
             default_radius=p("blacklist_radius").value,
@@ -126,6 +127,7 @@ class FrontierExplorer(Node):
         self._spin_token = 0
         self._spin_deadline = 0.0
         self._warned_spin = False
+        self._precheck_failures = 0       # pre-check failures since the last goal sent
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -202,6 +204,9 @@ class FrontierExplorer(Node):
             "spin_time_allowance": 20.0,
             "max_recoveries": 2,
             "defer_radius": 0.3,
+            "goal_offset": 0.0,
+            "goal_timeout_base": 20.0,
+            "goal_timeout_per_m": 6.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -363,6 +368,7 @@ class FrontierExplorer(Node):
             self.get_parameter("map_frame").value,
         )
         self._publish_markers(result.clusters, result.candidates[:1])
+        self.get_logger().info(result.summary(), throttle_duration_sec=2.0)
 
         if not result.candidates:
             self._empty_cycles += 1
@@ -562,9 +568,20 @@ class FrontierExplorer(Node):
         result = future.result()
         if result.status == GoalStatus.STATUS_SUCCEEDED and result.result.path.poses:
             self._send_goal(candidate)
+            return
+        self._reject(candidate, "no_path")
+        # Re-rank rather than falling through to the next queued candidate:
+        # that is the best goal in some *other* cluster, often on the far side
+        # of the map, while the cluster that just failed may well have
+        # another reachable cell right next to the deferred one.
+        self._queue = []
+        self._precheck_failures += 1
+        self._state = SELECTING
+        if self._precheck_failures < self.get_parameter("max_prechecks").value:
+            self._next_select_time = self._now()
         else:
-            self._reject(candidate, "no_path")
-            self._try_next_candidate()
+            self._precheck_failures = 0
+            self._next_select_time = self._now() + self.get_parameter("settle_time").value
 
     def _precheck_timed_out(self):
         self._precheck_token += 1    # ignore the late reply
@@ -592,14 +609,20 @@ class FrontierExplorer(Node):
         pose = candidate.pose
         pose.header.stamp = self.get_clock().now().to_msg()
         self._goal_pub.publish(pose)
+        self._precheck_failures = 0
 
         goal = ManagedNavigate.Goal()
         goal.target_pose = pose
+        base = self.get_parameter("goal_timeout_base").value
+        per_m = self.get_parameter("goal_timeout_per_m").value
+        timeout = base + per_m * candidate.distance
         self._active = {
             "candidate": candidate,
             "handle": None,
             "cancel": False,
             "retries": 0,
+            "deadline": self._now() + timeout if timeout > 0.0 else None,
+            "timed_out": False,
         }
         self._state = NAVIGATING
         self._last_validity_check = self._now()
@@ -643,6 +666,10 @@ class FrontierExplorer(Node):
         x = candidate.pose.pose.position.x
         y = candidate.pose.pose.position.y
         decision = decide(code, cancelled_by_explorer=active["cancel"])
+        if active["timed_out"]:
+            # Nav2 kept retrying a goal the robot could not get to (e.g.
+            # "Failed to make progress" in a tight corner): give up on it.
+            decision = GoalDecision(mark_visited=True, blacklist=True)
         self._active = None
 
         if decision.retry and active["retries"] < self.get_parameter("max_internal_retries").value:
@@ -654,7 +681,7 @@ class FrontierExplorer(Node):
         if decision.mark_visited or decision.retry:
             self._selector.mark_visited(x, y)
         if decision.blacklist:
-            self._blacklist.add(x, y, "result_%d" % code)
+            self._blacklist.add(x, y, "timeout" if active["timed_out"] else "result_%d" % code)
         # The robot has (probably) moved, so the map changed: give deferred
         # goals another chance, and a reached goal counts as progress.
         self._deferred.clear()
@@ -680,6 +707,15 @@ class FrontierExplorer(Node):
         now = self._now()
         period = self.get_parameter("validity_check_period").value
         if active is None or active["cancel"] or self._map is None:
+            return
+        if active["deadline"] is not None and now > active["deadline"]:
+            pose = active["candidate"].pose.pose
+            self.get_logger().warn(
+                "Goal (%.2f, %.2f) not reached in time; giving up on it."
+                % (pose.position.x, pose.position.y)
+            )
+            active["timed_out"] = True
+            self._cancel_active()
             return
         if now - self._last_validity_check < period:
             return

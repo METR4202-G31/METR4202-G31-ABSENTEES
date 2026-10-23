@@ -163,7 +163,7 @@ controller_server:
       min_vel_y: 0.0
       max_vel_x: 0.26
       max_vel_y: 0.0
-      max_vel_theta: 1.0
+      max_vel_theta: 0.4 # G31: was 1.0, avoid blurry LIDAR scans when turning
       min_speed_xy: 0.0
       max_speed_xy: 0.26
       min_speed_theta: 0.0
@@ -333,7 +333,7 @@ behavior_server:
     transform_tolerance: 0.1
     use_sim_time: true
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
+    max_rotational_vel: 0.4 # G31: was 1.0, avoid blurry LIDAR scans when turning
     min_rotational_vel: 0.4
     rotational_acc_lim: 3.2
 

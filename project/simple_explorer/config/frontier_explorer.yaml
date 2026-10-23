@@ -40,7 +40,8 @@ frontier_explorer:
     managed_navigate_action: managed_navigate
     compute_path_action: compute_path_to_pose
     precheck_path: true          # ask the planner for a path before sending a goal
-    max_prechecks: 5             # candidates checked per selection cycle
+    max_prechecks: 5             # planner pre-check failures in a row before pausing settle_time;
+                                 # after each failure the frontiers are re-ranked
     precheck_timeout: 3.0        # s
 
     # Loop behaviour
@@ -58,3 +59,9 @@ frontier_explorer:
     spin_angle: 6.28             # rad per spin (one full turn)
     spin_time_allowance: 20.0    # s
     max_recoveries: 2            # spins in a row with no reachable frontier before DONE_*
+
+    # Goal placement and time limit
+    goal_offset: 0.25            # m; goals sit this far back from the frontier edge, in known
+                                 # free space (NavFn often fails on goals right at the edge)
+    goal_timeout_base: 20.0      # s; a goal not reached within base + per_m * driving distance
+    goal_timeout_per_m: 6.0      # s/m; is cancelled and blacklisted. Both 0 = no time limit.
