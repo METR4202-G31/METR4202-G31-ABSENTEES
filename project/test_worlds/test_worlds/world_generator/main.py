@@ -66,7 +66,9 @@ def generate_world(rows=20, cols=20, cell_size=0.5, seed=42,
         extra = Segment(*values)
         feature_segments.append(extra)
         rasterize_segments(grid, [extra], wall_thickness)
-    spawn_cell = choose_spawn_cell(grid)
+    spawn_cell = choose_spawn_cell(
+        grid, wall_segments=feature_segments,
+        wall_thickness=wall_thickness)
     grid.assert_closed()
     reachable_cells = grid.reachable_cells(spawn_cell)
     marker_positions = place_markers(grid, seed=seed, reachable_cells=reachable_cells)

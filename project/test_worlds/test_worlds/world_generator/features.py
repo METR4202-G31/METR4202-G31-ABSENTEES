@@ -164,13 +164,13 @@ def room_feature(width=3.0, height=3.0):
 
 def dead_end_feature():
     """Return a narrow dead-end corridor open at one end."""
-    return _rect(1.0, 3.2, (("bottom", -0.4, 0.4),))
+    return _rect(1.0, 2.4, (("bottom", -0.4, 0.4),))
 
 
 def narrow_passage_feature():
     """Return a narrow passage open at both ends."""
     return _rect(
-        1.0, 3.2,
+        1.0, 2.4,
         (("bottom", -0.4, 0.4), ("top", -0.4, 0.4)),
     )
 
@@ -178,7 +178,7 @@ def narrow_passage_feature():
 def l_corridor_feature():
     """Return an L-shaped corridor with openings at both ends."""
     width = 0.9
-    outer = 3.8
+    outer = 3.0
     segments = (
         Segment(-width / 2, -outer / 2, width / 2, -outer / 2),
         Segment(width / 2, -outer / 2, width / 2, -width / 2),
@@ -193,9 +193,9 @@ def l_corridor_feature():
 def wall_section_feature():
     """Return a long wall with a central opening."""
     return VectorFeature(
-        (Segment(-2.0, 0.0, -0.35, 0.0),
-         Segment(0.35, 0.0, 2.0, 0.0)),
-        4.0,
+        (Segment(-1.6, 0.0, -0.35, 0.0),
+         Segment(0.35, 0.0, 1.6, 0.0)),
+        3.2,
         0.1,
     )
 

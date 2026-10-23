@@ -61,7 +61,7 @@ def segment_bounds(segments):
     return min(xs), max(xs), min(ys), max(ys)
 
 
-def _point_segment_distance(x, y, segment):
+def point_segment_distance(x, y, segment):
     """Return the distance from a point to a segment."""
     dx = segment.x2 - segment.x1
     dy = segment.y2 - segment.y1
@@ -82,7 +82,7 @@ def rasterize_segments(grid, segments, wall_thickness):
     for row in range(grid.rows):
         for col in range(grid.cols):
             x, y, _ = grid.cell_to_world(row, col)
-            if any(_point_segment_distance(x, y, segment) <= radius
+            if any(point_segment_distance(x, y, segment) <= radius
                    for segment in segments):
                 grid.set_cell(row, col, WALL)
 

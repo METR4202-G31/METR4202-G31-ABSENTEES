@@ -16,7 +16,7 @@ from test_worlds.world_generator.features import (
     wall_section_kernel,
 )
 from test_worlds.world_generator.grid import DOORWAY, FREE, WALL, Grid
-from test_worlds.world_generator.geometry import Segment
+from test_worlds.world_generator.geometry import Segment, point_segment_distance
 from test_worlds.world_generator.features import VECTOR_FEATURES
 from test_worlds.world_generator.main import build_parser, generate_world
 from test_worlds.world_generator.placement import Placer, choose_spawn_cell
@@ -167,6 +167,23 @@ def test_markers_are_seeded_and_unique():
 def test_spawn_cell_is_nearest_to_center():
     grid = Grid(5, 5, default_cell=FREE)
     assert choose_spawn_cell(grid) == (2, 2)
+
+
+def test_spawn_cell_has_clearance_from_wall_segments():
+    grid = Grid(21, 21, cell_size=0.1, default_cell=FREE)
+    wall = Segment(0.0, -1.0, 0.0, 1.0)
+    spawn = choose_spawn_cell(
+        grid, wall_segments=(wall,), wall_thickness=0.1)
+    x, y, _ = grid.cell_to_world(*spawn)
+    assert point_segment_distance(x, y, wall) >= 0.45 - 1e-9
+
+
+def test_spawn_cell_fails_when_no_clearance_exists():
+    grid = Grid(3, 3, cell_size=0.1, default_cell=FREE)
+    with pytest.raises(ValueError, match="requested wall clearance"):
+        choose_spawn_cell(
+            grid, wall_segments=(Segment(-1.0, 0.0, 1.0, 0.0),),
+            wall_thickness=0.1)
 
 
 def test_closed_grid_never_allows_features_to_open_boundary():

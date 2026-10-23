@@ -67,11 +67,13 @@ source ~/metr4202_ws/install/setup.bash
 export TURTLEBOT3_MODEL=waffle_pi
 
 ros2 launch test_worlds explore.launch.py \
-    rows:=30 \
-    cols:=30 \
-    cell_size:=0.75 \
+    width:=10 \
+    height:=10 \
+    resolution:=0.05 \
+    wall_thickness:=0.1 \
     features:="room:3,dead_end:2,narrow_passage:4,large_empty_space:1,l_corridor:3,wall_section:2,plus:2" \
-    seed:=42
+    min_feature_gap:=0.25 \
+    seed:=97
 ```
 
 This generates a deterministic Gazebo world, places the TurtleBot3 and ArUco
@@ -158,13 +160,6 @@ The project is split into several ROS 2 packages in the `project/` directory.
 ## test_worlds
 
 This package is responsible for randomly generating Gazebo worlds and launching them.
-
-Example:
-
-```bash
-TURTLEBOT3_MODEL=waffle_pi ros2 launch test_worlds explore.launch.py rows:=50 cols:=50 \
-features:="room:3,dead_end:2,narrow_passage:4,large_empty_space:1,l_corridor:3,wall_section:2,plus:2" min_feature_gap:=2 seed:=97
-```
 
 World generation can be made deterministic by specifying a fixed `seed`.
 

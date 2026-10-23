@@ -27,9 +27,14 @@ grid is derived at the requested resolution for occupancy, connectivity,
 spawn selection, and marker placement. The older `rows`, `cols`, and
 `cell_size` options remain available for existing commands.
 
+Spawn selection requires a 0.4 m radius around the robot centre to be clear of
+the generated wall geometry, including half the configured wall thickness.
+
 Available vector obstacles include `room`, `dead_end`, `narrow_passage`,
 `l_corridor`, `wall_section`, `large_empty_space`, `plus`, `angled_wall`, and
-`zigzag`. They can be combined, for example:
+`zigzag`. Corridor and wall feature lengths are kept compact enough for the
+default 8 m x 8 m example while preserving their interior widths. They can be
+combined, for example:
 
 ```bash
 ros2 launch test_worlds explore.launch.py \

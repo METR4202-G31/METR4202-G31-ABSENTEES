@@ -4,7 +4,7 @@ import random
 import math
 
 from .grid import FREE, Grid
-from .geometry import segment_bounds, transform_segments
+from .geometry import point_segment_distance, segment_bounds, transform_segments
 
 
 class Placer:
@@ -140,11 +140,28 @@ class Placer:
         return repairs
 
 
-def choose_spawn_cell(grid):
-    """Choose the free cell nearest the geometric grid center."""
+def choose_spawn_cell(grid, wall_segments=(), wall_thickness=0.0,
+                      robot_radius=0.4):
+    """Choose the nearest free cell with a clear robot-sized spawn area."""
+    if wall_thickness < 0 or robot_radius < 0:
+        raise ValueError("wall thickness and robot radius cannot be negative")
     free_cells = grid.get_free_cells()
     if not free_cells:
         raise ValueError("cannot choose a spawn cell from a grid without free cells")
+
+    clearance = wall_thickness / 2.0 + robot_radius
+    if wall_segments:
+        free_cells = [
+            cell for cell in free_cells
+            if all(
+                point_segment_distance(
+                    *grid.cell_to_world(*cell)[:2], segment) >= clearance
+                for segment in wall_segments
+            )
+        ]
+    if not free_cells:
+        raise ValueError(
+            "cannot choose a spawn cell with the requested wall clearance")
 
     center_row = (grid.rows - 1) / 2
     center_col = (grid.cols - 1) / 2
