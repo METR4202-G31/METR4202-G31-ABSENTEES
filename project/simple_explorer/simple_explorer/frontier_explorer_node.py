@@ -15,15 +15,27 @@ Publishes:
                       DONE_NO_FRONTIERS or DONE_BLACKLISTED_REMAIN
   /explore/frontiers  (MarkerArray) frontier cells, current goal, blacklist
 Action clients:
-  managed_navigate (navigation_interfaces/ManagedNavigate), compute_path_to_pose (Nav2)
+  managed_navigate (navigation_interfaces/ManagedNavigate), compute_path_to_pose (Nav2),
+  spin (Nav2 behavior server)
+
+Startup and recovery:
+  - waits startup_delay seconds after the map, costmaps, TF and Nav2 are all
+    up, then (initial_spin) turns on the spot once so SLAM sees all round;
+  - a goal the planner pre-check cannot reach is only *deferred*, not
+    blacklisted: it is skipped until the robot has moved or turned, because
+    early on "no path" usually means the map is still incomplete;
+  - when no reachable frontier is left, the robot spins on the spot and
+    retries the deferred goals, up to max_recoveries times in a row, before
+    reporting DONE_*. A goal reached successfully resets that count.
 """
 
 import math
 from typing import List, Optional
 
 from action_msgs.msg import GoalStatus
+from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Point, Pose, PoseStamped
-from nav2_msgs.action import ComputePathToPose
+from nav2_msgs.action import ComputePathToPose, Spin
 from nav_msgs.msg import OccupancyGrid
 from navigation_interfaces.action import ManagedNavigate
 from navigation_interfaces.msg import FailedRegionArray
@@ -55,6 +67,7 @@ DONE_BLACKLISTED_REMAIN = "DONE_BLACKLISTED_REMAIN"
 SELECTING = "SELECTING"
 PRECHECKING = "PRECHECKING"
 NAVIGATING = "NAVIGATING"
+RECOVERING = "RECOVERING"   # spinning on the spot so SLAM can see more
 IDLE = "IDLE"   # stopped or done: no goals are sent
 
 
@@ -86,6 +99,9 @@ class FrontierExplorer(Node):
             default_radius=p("blacklist_radius").value,
             min_failure_count=p("min_failure_count").value,
         )
+        # Goals the planner pre-check could not reach. Unlike the blacklist
+        # these are forgotten as soon as the robot moves or spins.
+        self._deferred = GoalBlacklist(default_radius=p("defer_radius").value)
 
         self._map: Optional[OccupancyGrid] = None
         self._global_costmap: Optional[OccupancyGrid] = None
@@ -103,6 +119,13 @@ class FrontierExplorer(Node):
         self._last_validity_check = 0.0
         self._warned_planner = False
         self._precheck_candidate: Optional[FrontierCandidate] = None
+        self._started = False             # startup delay and initial spin done
+        self._ready_since: Optional[float] = None
+        self._recoveries = 0              # spins since the last successful goal
+        self._spin_handle = None
+        self._spin_token = 0
+        self._spin_deadline = 0.0
+        self._warned_spin = False
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -135,6 +158,7 @@ class FrontierExplorer(Node):
         self._planner_client = ActionClient(
             self, ComputePathToPose, p("compute_path_action").value
         )
+        self._spin_client = ActionClient(self, Spin, p("spin_action").value)
 
         self._publish_status(WAITING)
         self.create_timer(1.0 / p("loop_rate_hz").value, self._tick)
@@ -171,6 +195,13 @@ class FrontierExplorer(Node):
             "validity_check_period": 2.0,
             "frontier_gone_radius": 1.0,
             "max_internal_retries": 2,
+            "startup_delay": 2.0,
+            "initial_spin": True,
+            "spin_action": "spin",
+            "spin_angle": 6.28,
+            "spin_time_allowance": 20.0,
+            "max_recoveries": 2,
+            "defer_radius": 0.3,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -205,6 +236,8 @@ class FrontierExplorer(Node):
         self._queue = []
         if self._state == NAVIGATING:
             self._cancel_active()
+        if self._state == RECOVERING:
+            self._cancel_spin()
         self._state = IDLE
         self._publish_status(STOPPED)
 
@@ -220,6 +253,8 @@ class FrontierExplorer(Node):
             self._done_status = None
         else:
             self.get_logger().info("Resuming exploration.")
+        self._deferred.clear()
+        self._recoveries = 0
         self._empty_cycles = 0
         self._state = SELECTING
         self._publish_status(EXPLORING)
@@ -228,6 +263,10 @@ class FrontierExplorer(Node):
 
     def _now(self) -> float:
         return self.get_clock().now().nanoseconds / 1e9
+
+    def _is_blocked(self, x: float, y: float) -> bool:
+        """Return True if (x, y) is blacklisted or deferred."""
+        return self._blacklist.is_blocked(x, y) or self._deferred.is_blocked(x, y)
 
     def _publish_status(self, status: str):
         self._status = status
@@ -294,6 +333,12 @@ class FrontierExplorer(Node):
         if self._state == NAVIGATING:
             self._revalidate_active_goal()
             return
+        if self._state == RECOVERING:
+            if self._now() > self._spin_deadline:
+                self.get_logger().warn("Spin did not finish in time; cancelling it.")
+                self._cancel_spin()
+                self._after_spin()
+            return
         if self._now() >= self._next_select_time:
             self._select()
 
@@ -310,9 +355,11 @@ class FrontierExplorer(Node):
             )
             self._publish_status_if_changed(WAITING)
             return
+        if not self._started and not self._startup_done():
+            return
 
         result = self._selector.rank_candidates(
-            self._map, robot, layers, self._blacklist.is_blocked,
+            self._map, robot, layers, self._is_blocked,
             self.get_parameter("map_frame").value,
         )
         self._publish_markers(result.clusters, result.candidates[:1])
@@ -320,6 +367,21 @@ class FrontierExplorer(Node):
         if not result.candidates:
             self._empty_cycles += 1
             if self._empty_cycles >= self.get_parameter("empty_cycles_to_finish").value:
+                limit = self.get_parameter("max_recoveries").value
+                if self._recoveries < limit:
+                    # Before giving up, turn on the spot: SLAM sees more, the
+                    # costmaps refresh, and deferred goals get another try.
+                    self._recoveries += 1
+                    self._empty_cycles = 0
+                    self.get_logger().info(
+                        "No reachable frontier (%d deferred, %d unreachable); "
+                        "recovery spin %d/%d." % (
+                            len(self._deferred), result.unreachable_clusters,
+                            self._recoveries, limit,
+                        )
+                    )
+                    self._start_spin()
+                    return
                 if result.low_gain_clusters:
                     self.get_logger().info(
                         "%d frontier(s) ignored: too little unknown space behind them."
@@ -338,6 +400,105 @@ class FrontierExplorer(Node):
         limit = self.get_parameter("max_prechecks").value
         self._queue = list(result.candidates[:limit])
         self._try_next_candidate()
+
+    def _startup_done(self) -> bool:
+        """
+        Hold off the first selection until Nav2 has settled.
+
+        Inputs being available is not enough: the planner comes up a moment
+        after the lifecycle manager reports active, and the global costmap
+        still holds its first, partial map. Pre-checks run straight away all
+        failed and the explorer finished without moving. Returns True once
+        the startup delay is over and any initial spin has been started.
+        """
+        if (self.get_parameter("precheck_path").value
+                and not self._planner_client.server_is_ready()):
+            self.get_logger().info(
+                "Waiting for the planner (compute_path_to_pose)...",
+                throttle_duration_sec=5.0,
+            )
+            return False
+        now = self._now()
+        delay = self.get_parameter("startup_delay").value
+        if self._ready_since is None:
+            self._ready_since = now
+            self.get_logger().info("Nav2 and the map are up; starting in %.1f s." % delay)
+        if now - self._ready_since < delay:
+            return False
+        self._started = True
+        if self.get_parameter("initial_spin").value:
+            self.get_logger().info("Initial spin so SLAM can see all round.")
+            self._start_spin()
+            return False
+        return True
+
+    # ---- spinning on the spot (startup and recovery) ---------------------------
+
+    def _start_spin(self):
+        """Ask the Nav2 behavior server to turn the robot on the spot."""
+        self._publish_status_if_changed(EXPLORING)
+        if not self._spin_client.server_is_ready():
+            if not self._warned_spin:
+                self.get_logger().warn(
+                    "Spin action '%s' is not available; skipping spins."
+                    % self.get_parameter("spin_action").value
+                )
+                self._warned_spin = True
+            self._after_spin()
+            return
+        allowance = float(self.get_parameter("spin_time_allowance").value)
+        goal = Spin.Goal()
+        goal.target_yaw = float(self.get_parameter("spin_angle").value)
+        goal.time_allowance = Duration(sec=int(math.ceil(allowance)), nanosec=0)
+
+        self._state = RECOVERING
+        self._spin_token += 1
+        token = self._spin_token
+        self._spin_deadline = self._now() + allowance + 5.0
+        self._spin_client.send_goal_async(goal).add_done_callback(
+            lambda f: self._on_spin_accepted(f, token)
+        )
+
+    def _on_spin_accepted(self, future, token):
+        handle = future.result()
+        if token != self._spin_token:
+            # Cancelled or timed out before the server answered.
+            if handle.accepted:
+                handle.cancel_goal_async()
+            return
+        if not handle.accepted:
+            self.get_logger().warn("Spin goal rejected; continuing without it.")
+            self._after_spin()
+            return
+        self._spin_handle = handle
+        handle.get_result_async().add_done_callback(
+            lambda f: self._on_spin_result(f, token)
+        )
+
+    def _on_spin_result(self, future, token):
+        if token != self._spin_token:
+            return
+        status = future.result().status
+        if status != GoalStatus.STATUS_SUCCEEDED:
+            # e.g. "collision ahead" next to a wall: the map still gained
+            # something from the partial turn, so carry on regardless.
+            self.get_logger().info("Spin ended early (status %d); continuing." % status)
+        self._after_spin()
+
+    def _cancel_spin(self):
+        self._spin_token += 1     # ignore any late reply
+        if self._spin_handle is not None:
+            self._spin_handle.cancel_goal_async()
+        self._spin_handle = None
+
+    def _after_spin(self):
+        """Go back to selecting; the robot has turned, so retry deferred goals."""
+        self._spin_handle = None
+        self._deferred.clear()
+        if self._state == IDLE:     # stopped while spinning
+            return
+        self._state = SELECTING
+        self._next_select_time = self._now() + self.get_parameter("settle_time").value
 
     def _publish_status_if_changed(self, status: str):
         if self._status != status:
@@ -411,11 +572,17 @@ class FrontierExplorer(Node):
         self._send_goal(self._precheck_candidate)
 
     def _reject(self, candidate: FrontierCandidate, reason: str):
+        """
+        Skip a goal the planner pre-check could not reach.
+
+        It is deferred rather than blacklisted: on a small or half-built map
+        "no path" is often temporary, and blacklisting with a 0.5 m radius
+        used to cover every frontier within seconds of starting.
+        """
         pose = candidate.pose
         x, y = pose.pose.position.x, pose.pose.position.y
-        self.get_logger().info("Rejected goal (%.2f, %.2f): %s" % (x, y, reason))
-        self._blacklist.add(x, y, reason)
-        self._selector.mark_visited(x, y)
+        self.get_logger().info("Deferred goal (%.2f, %.2f): %s" % (x, y, reason))
+        self._deferred.add(x, y, reason)
         pose.header.stamp = self.get_clock().now().to_msg()
         self._reject_pub.publish(pose)
 
@@ -488,6 +655,11 @@ class FrontierExplorer(Node):
             self._selector.mark_visited(x, y)
         if decision.blacklist:
             self._blacklist.add(x, y, "result_%d" % code)
+        # The robot has (probably) moved, so the map changed: give deferred
+        # goals another chance, and a reached goal counts as progress.
+        self._deferred.clear()
+        if code == ManagedNavigate.Result.SUCCEEDED:
+            self._recoveries = 0
 
         if self._state == IDLE:     # stopped while the goal was running
             return
@@ -550,6 +722,17 @@ class FrontierExplorer(Node):
         for entry in self._blacklist.entries():
             blocked.points.append(Point(x=entry.x, y=entry.y, z=0.1))
         array.markers.append(blocked)
+
+        deferred = Marker()
+        deferred.header.frame_id = frame
+        deferred.header.stamp = stamp
+        deferred.ns = "deferred"
+        deferred.type = Marker.SPHERE_LIST
+        deferred.scale.x = deferred.scale.y = deferred.scale.z = 0.2
+        deferred.color.r, deferred.color.g, deferred.color.a = 1.0, 0.6, 0.6
+        for entry in self._deferred.entries():
+            deferred.points.append(Point(x=entry.x, y=entry.y, z=0.1))
+        array.markers.append(deferred)
 
         for candidate in candidates:
             arrow = Marker()
