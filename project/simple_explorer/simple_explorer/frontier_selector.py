@@ -8,11 +8,27 @@ costmaps, it ranks frontier goals best-first. It does not talk to Nav2.
 Pipeline:
   - find frontier cells (free cells bordering unknown space) and group them
     into clusters, dropping clusters too small to be worth visiting;
-  - for each cluster pick one goal cell: a free frontier cell close to the
-    cluster centroid that is far enough from the robot, safe in the
-    costmaps, not blacklisted and not close to a goal already visited;
+  - work out how far the robot has to drive to every free cell (a
+    shortest-path search over known free space, with walls inflated by the
+    robot's clearance), so frontiers behind walls are not mistaken for
+    close ones and frontiers the robot cannot reach are dropped;
+  - for each cluster pick one goal cell: a reachable free frontier cell
+    close to the cluster centroid that is far enough from the robot, safe
+    in the costmaps, not blacklisted and not close to a goal already visited;
   - orient the goal towards the unexplored side of the frontier;
-  - score clusters (closer and bigger is better) and return them best-first.
+  - score clusters (shorter drive and bigger is better) and return them
+    best-first.
+
+Optional scoring terms (all off by default, switched on in the YAML config):
+  - information gain: how much unknown space actually lies behind a
+    frontier, found by flood-filling into the unknown cells next to it.
+    A small unmapped speck in the middle of a mapped room is enclosed by
+    free cells, so its flood fill stops almost immediately and its gain is
+    tiny, while a corridor leading into unexplored space has a large gain.
+    Clusters below min_gain are ignored.
+  - turn penalty: frontiers that need the robot to turn around cost more
+    than frontiers roughly ahead of it, so it finishes the corridor or room
+    it is in before going back.
 
 Optional scoring terms (all off by default, switched on in the YAML config):
   - information gain: how much unknown space actually lies behind a
@@ -32,6 +48,7 @@ tell "nothing left" from "only blacklisted frontiers left".
 
 from collections import deque
 from dataclasses import dataclass, field
+import heapq
 import math
 from typing import Callable, List, Optional, Sequence, Tuple
 
@@ -42,6 +59,7 @@ import numpy as np
 FREE_MAX = 10   # occupancy values 0..FREE_MAX are treated as "free"
 UNKNOWN = -1
 COSTMAP_COST_LIMIT = 75   # Nav2 cost is 0-100; above this is too close to an obstacle
+TRAVEL_CELL_SIZE = 0.1    # m; the travel-distance search runs on cells about this big
 
 NEIGHBOURS_8 = [
     (dx, dy)
@@ -71,6 +89,23 @@ def _frontier_mask(data: np.ndarray) -> np.ndarray:
     for dx, dy in NEIGHBOURS_8:
         near_unknown |= padded[1 + dy:1 + dy + height, 1 + dx:1 + dx + width]
     return free & near_unknown
+
+
+def _dilate(mask: np.ndarray, radius: int) -> np.ndarray:
+    """Grow the True cells of mask by a disc of radius cells."""
+    if radius <= 0:
+        return mask.copy()
+    height, width = mask.shape
+    padded = np.pad(mask, radius, constant_values=False)
+    out = mask.copy()
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dx * dx + dy * dy <= radius * radius:
+                out |= padded[
+                    radius + dy:radius + dy + height,
+                    radius + dx:radius + dx + width,
+                ]
+    return out
 
 
 def _yaw_of(q) -> float:
@@ -141,6 +176,92 @@ def yaw_to_quaternion(yaw: float) -> Tuple[float, float, float, float]:
     return (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))
 
 
+def world_to_cell(grid: OccupancyGrid, x: float, y: float) -> Tuple[int, int]:
+    """Convert map-frame metres to the (x, y) grid cell (map yaw ignored)."""
+    info = grid.info
+    return (
+        math.floor((x - info.origin.position.x) / info.resolution),
+        math.floor((y - info.origin.position.y) / info.resolution),
+    )
+
+
+class TravelMap:
+    """
+    Driving distance from the robot to every known free cell.
+
+    Occupied cells are inflated by the clearance, unknown cells are never
+    entered, and the search runs on cells about TRAVEL_CELL_SIZE wide to
+    keep it fast in pure Python. Distances are approximate (8-connected
+    grid paths), which is enough to rank frontiers.
+    """
+
+    def __init__(self, data: np.ndarray, resolution: float, robot_cell, clearance: float):
+        height, width = data.shape
+        free = (data >= 0) & (data <= FREE_MAX)
+        blocked = _dilate(data > FREE_MAX, int(round(clearance / resolution)))
+        passable = free & ~blocked
+
+        # The robot may stand inside the inflated band (e.g. next to a wall):
+        # let it drive out of the free cells around it.
+        rx, ry = robot_cell
+        reach = int(round(clearance / resolution)) + 1
+        y0, y1 = max(ry - reach, 0), min(ry + reach + 1, height)
+        x0, x1 = max(rx - reach, 0), min(rx + reach + 1, width)
+        passable[y0:y1, x0:x1] |= free[y0:y1, x0:x1]
+
+        f = max(1, int(round(TRAVEL_CELL_SIZE / resolution)))
+        rows, cols = -(-height // f), -(-width // f)
+        padded = np.zeros((rows * f, cols * f), dtype=bool)
+        padded[:height, :width] = passable
+        coarse = padded.reshape(rows, f, cols, f).any(axis=(1, 3))
+
+        self._factor = f
+        self._cols = cols
+        sx, sy = rx // f, ry // f
+        # valid is False when the robot is not on known free space, so no
+        # distance can be trusted; callers should fall back to straight lines.
+        self.valid = 0 <= sx < cols and 0 <= sy < rows and bool(coarse[sy, sx])
+        self._dist = self._search(coarse, sx, sy, resolution * f) if self.valid else []
+
+    @staticmethod
+    def _search(passable: np.ndarray, sx: int, sy: int, step: float) -> List[float]:
+        rows, cols = passable.shape
+        size = rows * cols
+        dist = [math.inf] * size
+        open_cells = passable.ravel().tolist()
+        diagonal = step * math.sqrt(2.0)
+        moves = [
+            (dy * cols + dx, dx, diagonal if dx and dy else step)
+            for dx, dy in NEIGHBOURS_8
+        ]
+        start = sy * cols + sx
+        dist[start] = 0.0
+        heap = [(0.0, start)]
+        while heap:
+            d, i = heapq.heappop(heap)
+            if d > dist[i]:
+                continue
+            x = i % cols
+            for offset, dx, cost in moves:
+                nx = x + dx
+                j = i + offset
+                if nx < 0 or nx >= cols or j < 0 or j >= size or not open_cells[j]:
+                    continue
+                nd = d + cost
+                if nd < dist[j]:
+                    dist[j] = nd
+                    heapq.heappush(heap, (nd, j))
+        return dist
+
+    def distance(self, cell_x: int, cell_y: int) -> float:
+        """Return how far the robot drives (m) to a grid cell; inf if unreachable."""
+        f = self._factor
+        index = (cell_y // f) * self._cols + cell_x // f
+        if cell_x < 0 or cell_y < 0 or index >= len(self._dist):
+            return math.inf
+        return self._dist[index]
+
+
 def frontier_near(grid: OccupancyGrid, x: float, y: float, radius: float) -> bool:
     """Return True if any frontier cell lies within radius metres of (x, y)."""
     info = grid.info
@@ -203,11 +324,8 @@ class SelectionResult:
     candidates: List[FrontierCandidate] = field(default_factory=list)
     clusters: List[List[Tuple[int, int]]] = field(default_factory=list)
     blocked_clusters: int = 0
-<<<<<<< HEAD
-=======
     unreachable_clusters: int = 0
     low_gain_clusters: int = 0
->>>>>>> 0de24eb (Frontier scoring: information gain and turn penalty, ignore enclosed specks)
 
 
 class FrontierSelector:
@@ -222,8 +340,17 @@ class FrontierSelector:
         distance_weight: float = 1.0,
         size_weight: float = 0.02,
         cost_limit: int = COSTMAP_COST_LIMIT,
+        use_travel_distance: bool = True,
+        travel_clearance: float = 0.15,
+        gain_weight: float = 0.0,
+        min_gain: float = 0.0,
+        gain_radius: float = 3.0,
+        max_gain_area: float = 12.0,
+        turn_weight: float = 0.0,
     ):
         self.min_cluster_size = min_cluster_size
+        self.use_travel_distance = use_travel_distance
+        self.travel_clearance = travel_clearance
         self.min_goal_distance = min_goal_distance
         self.revisit_radius = revisit_radius
         self.distance_weight = distance_weight
@@ -289,9 +416,8 @@ class FrontierSelector:
         return cx, cy
 
     @staticmethod
-    def _frontier_facing_yaw(grid: OccupancyGrid, cluster) -> float:
+    def _frontier_facing_yaw(data: np.ndarray, cluster) -> float:
         """Average direction from frontier cells towards their unknown neighbours."""
-        data = _grid_array(grid)
         height, width = data.shape
         dx_sum = 0.0
         dy_sum = 0.0
@@ -307,12 +433,6 @@ class FrontierSelector:
             return 0.0
         return math.atan2(dy_sum, dx_sum)
 
-<<<<<<< HEAD
-    def _score(self, robot_x, robot_y, goal_x, goal_y, cluster_size) -> float:
-        """Return the cost of a goal (lower is better): close and big wins."""
-        dist = math.hypot(goal_x - robot_x, goal_y - robot_y)
-        return self.distance_weight * dist - self.size_weight * cluster_size
-=======
     def _score(
         self, dist: float, cluster_size: int, gain: float = 0.0, turn: float = 0.0
     ) -> float:
@@ -330,7 +450,6 @@ class FrontierSelector:
             - self.gain_weight * gain
             + self.turn_weight * turn
         )
->>>>>>> 0de24eb (Frontier scoring: information gain and turn penalty, ignore enclosed specks)
 
     def _pick_goal_cell(
         self,
@@ -340,30 +459,40 @@ class FrontierSelector:
         robot_y: float,
         costmaps: Sequence[CostmapLayer],
         is_blocked: Optional[Callable[[float, float], bool]],
-    ) -> Tuple[Optional[Tuple[float, float]], bool]:
+        travel: Optional[TravelMap],
+    ) -> Tuple[Optional[Tuple[float, float, float]], bool, bool]:
         """
         Pick the goal cell for a cluster.
 
-        Returns ((x, y) or None, blocked) where blocked says a cell was
-        rejected only because of the blacklist.
+        Returns ((x, y, driving distance) or None, blocked, unreachable):
+        blocked says a cell was rejected because of the blacklist,
+        unreachable that a cell was rejected because no drive reaches it.
         """
         cen_x, cen_y = self._cluster_centroid(cluster)
         blocked = False
+        unreachable = False
         for cell in sorted(
             cluster, key=lambda c: math.hypot(c[0] - cen_x, c[1] - cen_y)
         ):
             x, y = cell_to_world(grid, cell[0], cell[1])
-            if math.hypot(x - robot_x, y - robot_y) < self.min_goal_distance:
+            straight = math.hypot(x - robot_x, y - robot_y)
+            if straight < self.min_goal_distance:
                 continue
             if is_blocked is not None and is_blocked(x, y):
                 blocked = True
                 continue
             if self._too_close_to_history(x, y):
                 continue
+            dist = straight
+            if travel is not None:
+                dist = travel.distance(cell[0], cell[1])
+                if math.isinf(dist):
+                    unreachable = True
+                    continue
             if not all(m.is_safe(x, y, self.cost_limit) for m in costmaps):
                 continue
-            return (x, y), blocked
-        return None, blocked
+            return (x, y, dist), blocked, unreachable
+        return None, blocked, unreachable
 
     def rank_candidates(
         self,
@@ -384,12 +513,22 @@ class FrontierSelector:
 
         clusters = self.find_clusters(grid)
         result = SelectionResult(clusters=clusters)
+        data = _grid_array(grid)
+
+        travel = None
+        if self.use_travel_distance and clusters:
+            robot_cell = world_to_cell(grid, robot_x, robot_y)
+            if _in_bounds(*robot_cell, grid.info.width, grid.info.height):
+                travel = TravelMap(
+                    data, grid.info.resolution, robot_cell, self.travel_clearance
+                )
+                if not travel.valid:
+                    travel = None
+            # Robot off the map or not on known free space (e.g. before SLAM
+            # catches up): fall back to straight-line distances rather than
+            # calling every frontier unreachable.
 
         for cluster in clusters:
-<<<<<<< HEAD
-            picked, blocked = self._pick_goal_cell(
-                grid, cluster, robot_x, robot_y, costmaps, is_blocked
-=======
             gain = 0.0
             if use_gain:
                 gain = information_gain(data, cluster, gain_depth, gain_cap) * cell_area
@@ -400,19 +539,20 @@ class FrontierSelector:
 
             picked, blocked, unreachable = self._pick_goal_cell(
                 grid, cluster, robot_x, robot_y, costmaps, is_blocked, travel
->>>>>>> 0de24eb (Frontier scoring: information gain and turn penalty, ignore enclosed specks)
             )
             if picked is None:
                 if blocked:
                     result.blocked_clusters += 1
+                elif unreachable:
+                    result.unreachable_clusters += 1
                 continue
-            goal_x, goal_y = picked
+            goal_x, goal_y, dist = picked
 
             pose = PoseStamped()
             pose.header.frame_id = frame_id
             pose.pose.position.x = goal_x
             pose.pose.position.y = goal_y
-            yaw = self._frontier_facing_yaw(grid, cluster)
+            yaw = self._frontier_facing_yaw(data, cluster)
             qx, qy, qz, qw = yaw_to_quaternion(yaw)
             pose.pose.orientation.x = qx
             pose.pose.orientation.y = qy
@@ -427,11 +567,7 @@ class FrontierSelector:
             result.candidates.append(
                 FrontierCandidate(
                     pose=pose,
-<<<<<<< HEAD
-                    score=self._score(robot_x, robot_y, goal_x, goal_y, len(cluster)),
-=======
                     score=self._score(dist, len(cluster), gain, turn),
->>>>>>> 0de24eb (Frontier scoring: information gain and turn penalty, ignore enclosed specks)
                     cluster_size=len(cluster),
                     gain=gain,
                 )

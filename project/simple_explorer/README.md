@@ -7,11 +7,27 @@ not drive Nav2 itself.
 ## How it works
 
 1. Find frontier cells (free cells next to unknown space) in the SLAM `/map` and
-   group them into clusters. Clusters under `min_cluster_size` cells are noise.
-2. For each cluster pick one goal cell: a free frontier cell near the cluster
-   centroid that is at least `min_goal_distance` from the robot, safe in the
-   global and local costmaps, not blacklisted, and not near a goal already visited.
-3. Rank clusters (closer and bigger is better) and, if `precheck_path` is set, ask
+   group them into clusters. Clusters under `min_cluster_size` cells (default 20,
+   i.e. 1 m) are noise or too small to be worth the trip; the aim is to reach
+   unknown space quickly, not to map every corner.
+2. Work out the driving distance from the robot to every known free cell: a
+   shortest-path search over free space with walls inflated by
+   `travel_clearance`, on ~0.1 m cells. Frontiers behind a wall therefore count
+   as far away, and frontiers that cannot be reached through known free space
+   are dropped without asking the planner. (`use_travel_distance: false` goes
+   back to straight-line distances.)
+3. For each cluster pick one goal cell: a reachable free frontier cell near the
+   cluster centroid that is at least `min_goal_distance` from the robot, safe in
+   the global and local costmaps, not blacklisted, and not near a goal already
+   visited.
+4. Rank clusters by `distance_weight * driving distance - size_weight * cluster
+   size - gain_weight * gain + turn_weight * turn` (shorter drive, more unknown space
+   behind the frontier and less turning is better). *Gain* is the area of unknown
+   space reached by flood-filling from the frontier into unknown cells (capped at
+   `max_gain_area`); a frontier with less than `min_gain` behind it, such as an
+   unmapped speck inside an already-mapped room, is ignored. *Turn* is how far
+   the robot must turn to face the goal, which keeps it finishing the corridor or
+   room it is in. If `precheck_path` is set, ask
    the Nav2 planner (`compute_path_to_pose`) whether a path exists. A goal with no
    path is blacklisted and published on `/explore/blacklist`.
 4. Publish the goal on `/explore` and send it to the supervisor's `ManagedNavigate`
@@ -43,6 +59,9 @@ decided here.
 | pub | `/explore` | `geometry_msgs/PoseStamped` | every goal sent, just a pose in `map` |
 | pub | `/explore/blacklist` | `geometry_msgs/PoseStamped` | every goal the explorer rejected itself |
 | pub | `/explore/status` | `std_msgs/String` | `WAITING`, `EXPLORING`, `STOPPED`, `DONE_NO_FRONTIERS`, `DONE_BLACKLISTED_REMAIN` (transient-local) |
+| pub | `frontier` | `visualization_msgs/Marker` | all detected frontier cells as small orange RViz circles |
+| pub | `goal` | `visualization_msgs/Marker` | all sent goals as green RViz circles |
+| pub | `blacklist` | `visualization_msgs/Marker` | all blacklisted goals as black RViz circles |
 | pub | `/explore/frontiers` | `visualization_msgs/MarkerArray` | frontier cells, next goal, blacklist (for RViz) |
 | action client | `managed_navigate` | `navigation_interfaces/ManagedNavigate` | needs the supervisor's action server |
 | action client | `compute_path_to_pose` | `nav2_msgs/ComputePathToPose` | optional goal pre-check |
