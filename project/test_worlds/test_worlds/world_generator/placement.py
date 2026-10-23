@@ -1,8 +1,10 @@
 """Seeded feature placement and deterministic spawn selection."""
 
 import random
+import math
 
 from .grid import FREE, Grid
+from .geometry import segment_bounds, transform_segments
 
 
 class Placer:
@@ -62,6 +64,45 @@ class Placer:
         self.random.shuffle(specifications)
         for name, factory, args, kwargs in specifications:
             self.place_feature(name, factory, *args, **kwargs)
+        return self.placed
+
+    def place_vector_features(self, features, map_width, map_height):
+        """Place vector features with seeded continuous transforms."""
+        half_width = map_width / 2.0
+        half_height = map_height / 2.0
+        for name, factory, args, kwargs in features:
+            feature = factory(*args, **kwargs)
+            placed = False
+            for _ in range(self.max_attempts):
+                scale = self.random.uniform(0.85, 1.15)
+                angle = self.random.uniform(-math.pi, math.pi)
+                x = self.random.uniform(
+                    -half_width + feature.width * scale / 2.0,
+                    half_width - feature.width * scale / 2.0,
+                )
+                y = self.random.uniform(
+                    -half_height + feature.height * scale / 2.0,
+                    half_height - feature.height * scale / 2.0,
+                )
+                segments = transform_segments(
+                    feature.segments, scale, angle, (x, y))
+                min_x, max_x, min_y, max_y = segment_bounds(segments)
+                gap = self.min_feature_gap
+                bounds = (min_x - gap, max_x + gap, min_y - gap, max_y + gap)
+                if any(
+                    not (
+                        bounds[1] < other[0] or other[1] < bounds[0] or
+                        bounds[3] < other[2] or other[3] < bounds[2]
+                    )
+                    for other in self._placed_bounds
+                ):
+                    continue
+                self._placed_bounds.append(bounds)
+                self.placed.append((name, segments))
+                placed = True
+                break
+            if not placed:
+                self.failed.append(name)
         return self.placed
 
     def connect_free_space(self):

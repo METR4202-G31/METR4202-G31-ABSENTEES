@@ -2,6 +2,7 @@
 
 from xml.etree import ElementTree
 
+from .geometry import Segment
 from .grid import WALL
 
 
@@ -9,11 +10,12 @@ class SDFBuilder:
     """Serialize grid walls, markers, and world settings into SDF XML."""
 
     def __init__(self, grid, marker_positions=(), wall_height=1.0,
-                 wall_thickness=None):
+                 wall_thickness=None, wall_segments=None):
         self.grid = grid
         self.marker_positions = list(marker_positions)
         self.wall_height = float(wall_height)
         self.wall_thickness = wall_thickness or grid.cell_size
+        self.wall_segments = list(wall_segments or ())
 
     def cell_to_world(self, row, col, z=0.0):
         """Convert a grid cell to the center of its Gazebo world position."""
@@ -56,6 +58,27 @@ class SDFBuilder:
         ElementTree.SubElement(
             script, "uri").text = "file://media/materials/scripts/gazebo.material"
         ElementTree.SubElement(script, "name").text = "Gazebo/Grey"
+
+    def _add_segment(self, world, segment, index):
+        """Add an oriented box for a continuous wall segment."""
+        model = ElementTree.SubElement(world, "model", {
+            "name": f"wall_segment_{index}",
+        })
+        ElementTree.SubElement(model, "static").text = "true"
+        x, y = segment.center
+        self._pose(model, x, y, self.wall_height / 2.0, segment.yaw)
+        link = ElementTree.SubElement(model, "link", {"name": "link"})
+        for kind in ("collision", "visual"):
+            element = ElementTree.SubElement(link, kind, {"name": kind})
+            self._box_geometry(
+                element, segment.length, self.wall_thickness, self.wall_height)
+            if kind == "visual":
+                material = ElementTree.SubElement(element, "material")
+                script = ElementTree.SubElement(material, "script")
+                ElementTree.SubElement(script, "uri").text = (
+                    "file://media/materials/scripts/gazebo.material")
+                ElementTree.SubElement(
+                    script, "name").text = "Gazebo/Grey"
 
     def _add_ground(self, world):
         """Add an explicit ground model instead of relying on an include."""
@@ -119,18 +142,22 @@ class SDFBuilder:
         ElementTree.SubElement(scene, "background").text = "0.7 0.7 0.7 1"
         ElementTree.SubElement(scene, "shadows").text = "1"
         ElementTree.SubElement(physics, "real_time_update_rate").text = "1000"
-        for row in range(self.grid.rows):
-            col = 0
-            while col < self.grid.cols:
-                if self.grid.get_cell(row, col) != WALL:
+        if self.wall_segments:
+            for index, segment in enumerate(self.wall_segments):
+                self._add_segment(world, segment, index)
+        else:
+            for row in range(self.grid.rows):
+                col = 0
+                while col < self.grid.cols:
+                    if self.grid.get_cell(row, col) != WALL:
+                        col += 1
+                        continue
+                    start_col = col
+                    while (col + 1 < self.grid.cols and
+                           self.grid.get_cell(row, col + 1) == WALL):
+                        col += 1
+                    self._add_wall_run(world, row, start_col, col)
                     col += 1
-                    continue
-                start_col = col
-                while (col + 1 < self.grid.cols and
-                       self.grid.get_cell(row, col + 1) == WALL):
-                    col += 1
-                self._add_wall_run(world, row, start_col, col)
-                col += 1
         for row, col, marker_id in self.marker_positions:
             self._add_marker(world, row, col, marker_id)
         ElementTree.indent(sdf, space="  ")

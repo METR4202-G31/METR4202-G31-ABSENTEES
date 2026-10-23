@@ -16,6 +16,8 @@ from test_worlds.world_generator.features import (
     wall_section_kernel,
 )
 from test_worlds.world_generator.grid import DOORWAY, FREE, WALL, Grid
+from test_worlds.world_generator.geometry import Segment
+from test_worlds.world_generator.features import VECTOR_FEATURES
 from test_worlds.world_generator.main import build_parser, generate_world
 from test_worlds.world_generator.placement import Placer, choose_spawn_cell
 
@@ -237,3 +239,59 @@ def test_world_includes_all_three_aruco_models(tmp_path):
     assert len({(row, col) for row, col, _ in markers}) == 3
     assert all(not grid.is_boundary(row, col)
                for row, col, _ in markers)
+
+
+def test_segment_reports_arbitrary_length_and_yaw():
+    segment = Segment(0.0, 0.0, 3.0, 4.0)
+    assert segment.length == pytest.approx(5.0)
+    assert segment.yaw == pytest.approx(0.927295218)
+
+
+def test_physical_dimensions_and_thin_angled_wall_are_emitted(tmp_path):
+    output = tmp_path / "vector.sdf"
+    grid, _, _, _ = generate_world(
+        width=4.0,
+        height=3.0,
+        resolution=0.05,
+        wall_thickness=0.08,
+        features="",
+        angled_wall="-1,-0.5,1,0.5",
+        output=str(output),
+    )
+    assert grid.cols == 80
+    assert grid.rows == 60
+    root = ElementTree.parse(output).getroot()
+    segment_model = [
+        model for model in root.findall(".//model")
+        if model.get("name", "").startswith("wall_segment_")
+    ][-1]
+    assert segment_model is not None
+    pose = [float(value) for value in segment_model.findtext("pose").split()]
+    assert pose[5] == pytest.approx(0.463647609)
+    size = segment_model.findtext("link/visual/geometry/box/size").split()
+    assert float(size[0]) == pytest.approx(2.2360679)
+    assert float(size[1]) == pytest.approx(0.08)
+
+
+def test_vector_feature_catalog_contains_angled_obstacles():
+    assert {"angled_wall", "zigzag"} <= set(VECTOR_FEATURES)
+    for name in ("angled_wall", "zigzag"):
+        feature = VECTOR_FEATURES[name]()
+        assert feature.segments
+        assert any(abs(segment.yaw) > 0.1 for segment in feature.segments)
+
+
+def test_vector_feature_placement_is_seeded(tmp_path):
+    first = tmp_path / "vector_first.sdf"
+    second = tmp_path / "vector_second.sdf"
+    kwargs = {
+        "width": 10.0,
+        "height": 7.0,
+        "resolution": 0.05,
+        "wall_thickness": 0.08,
+        "features": "room:1,angled_wall:2,zigzag:1",
+        "seed": 97,
+    }
+    generate_world(output=str(first), **kwargs)
+    generate_world(output=str(second), **kwargs)
+    assert first.read_text() == second.read_text()

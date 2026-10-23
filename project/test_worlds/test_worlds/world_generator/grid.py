@@ -117,6 +117,12 @@ class Grid:
                 for col in range(self.cols)
                 if self.get_cell(row, col) in (FREE, DOORWAY)]
 
+    def cell_to_world(self, row, col):
+        """Convert a grid cell center to centred world coordinates."""
+        x = (col - self.cols / 2 + 0.5) * self.cell_size
+        y = (self.rows / 2 - row - 0.5) * self.cell_size
+        return x, y, 0.0
+
     def reachable_cells(self, start):
         """Return the free cells reachable from a starting coordinate."""
         if start not in self.get_free_cells():

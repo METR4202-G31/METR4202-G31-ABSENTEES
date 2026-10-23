@@ -3,7 +3,7 @@
 <package format="3">
   <name>test_worlds</name>
   <version>0.0.0</version>
-  <description>Deterministic grid-based Gazebo exploration worlds.</description>
+  <description>Deterministic vector and raster Gazebo exploration worlds.</description>
   <maintainer email="zak@todo.todo">zak</maintainer>
   <license>Apache-2.0</license>
 

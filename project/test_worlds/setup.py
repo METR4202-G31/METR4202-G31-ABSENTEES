@@ -42,7 +42,7 @@ setup(
     zip_safe=True,
     maintainer='zak',
     maintainer_email='zak@todo.todo',
-    description='TODO: Package description',
+    description='Deterministic vector and raster Gazebo exploration worlds',
     license='TODO: License declaration',
     extras_require={
         'test': [
