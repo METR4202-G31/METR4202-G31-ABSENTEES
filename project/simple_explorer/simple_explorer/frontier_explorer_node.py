@@ -154,8 +154,9 @@ class FrontierExplorer(Node):
             marker_type=Marker.SPHERE_LIST,
             scale_x=0.2,
             scale_y=0.2,
-            color=ColorRGBA(g=1.0, a=1.0),
+            color=ColorRGBA(r=0.5, g=0.5, b=0.5, a=1.0),
         )
+        self._current_goal_pub = self.create_publisher(Marker, "goal", 10)
         self._blacklist_coords_pub = CoordinatePublisher(
             node=self,
             coords_dict=self._blacklisted_goals,
@@ -482,6 +483,7 @@ class FrontierExplorer(Node):
             "cancel": False,
             "retries": 0,
         }
+        self._publish_current_goal_marker()
         self._state = NAVIGATING
         self._last_validity_check = self._now()
         self.get_logger().info(
@@ -525,6 +527,7 @@ class FrontierExplorer(Node):
         y = candidate.pose.pose.position.y
         decision = decide(code, cancelled_by_explorer=active["cancel"])
         self._active = None
+        self._publish_current_goal_marker()
 
         if decision.retry and active["retries"] < self.get_parameter("max_internal_retries").value:
             active["retries"] += 1
@@ -654,6 +657,23 @@ class FrontierExplorer(Node):
     def _republish_markers(self):
         if self._map is not None:
             self._publish_markers(self._latest_clusters, self._latest_candidates)
+        self._goal_coords_pub.publish_coordinates()
+        self._publish_current_goal_marker()
+
+    def _publish_current_goal_marker(self):
+        marker = Marker()
+        marker.header.frame_id = self.get_parameter("map_frame").value
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "current goal"
+        marker.id = 0
+        marker.type = Marker.SPHERE_LIST
+        marker.action = Marker.ADD if self._active is not None else Marker.DELETE
+        marker.scale.x = marker.scale.y = marker.scale.z = 0.3
+        marker.color.g = 1.0
+        marker.color.a = 1.0
+        if self._active is not None:
+            marker.points.append(self._active["candidate"].pose.pose.position)
+        self._current_goal_pub.publish(marker)
 
     def _publish_blacklist_markers(self):
         self._blacklisted_goals.clear()
