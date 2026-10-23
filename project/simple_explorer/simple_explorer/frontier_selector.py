@@ -433,10 +433,6 @@ class FrontierSelector:
             return 0.0
         return math.atan2(dy_sum, dx_sum)
 
-    def _score(self, robot_x, robot_y, goal_x, goal_y, cluster_size) -> float:
-        """Return the cost of a goal (lower is better): close and big wins."""
-        dist = math.hypot(goal_x - robot_x, goal_y - robot_y)
-        return self.distance_weight * dist - self.size_weight * cluster_size
     def _score(
         self, dist: float, cluster_size: int, gain: float = 0.0, turn: float = 0.0
     ) -> float:
@@ -533,8 +529,6 @@ class FrontierSelector:
             # calling every frontier unreachable.
 
         for cluster in clusters:
-            picked, blocked = self._pick_goal_cell(
-                grid, cluster, robot_x, robot_y, costmaps, is_blocked
             gain = 0.0
             if use_gain:
                 gain = information_gain(data, cluster, gain_depth, gain_cap) * cell_area
