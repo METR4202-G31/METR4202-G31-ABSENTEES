@@ -143,7 +143,7 @@ controller_server:
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       required_movement_radius: 0.5
-      movement_time_allowance: 20.0      # G31: was 10.0. At 0.4 rad/s a turn-around alone
+      movement_time_allowance: 60.0      # G31: was 10.0. At 0.4 rad/s a turn-around alone
                                          # takes ~8 s, which counted as "no progress"
     # Goal checker parameters
     #precise_goal_checker:
@@ -156,62 +156,41 @@ controller_server:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.25
       yaw_goal_tolerance: 0.25
-    # G31: DWB wrapped in the Rotation Shim controller (part of Nav2 Humble).
-    # When a new path starts more than angular_dist_threshold away from the
-    # robot's heading, the shim first turns the robot on the spot to face it,
-    # then hands over to DWB. On its own DWB tries to "spiral out" instead,
-    # which in a small room or doorway drove the robot deeper in and got it
-    # stuck (Failed to make progress). The rotation is collision-checked; if
-    # it would hit something, control goes straight to DWB as before.
+    # G31: Regulated Pure Pursuit (RPP, part of Nav2 Humble) instead of DWB.
+    # DWB scores a fan of short sampled arcs; in the 0.75 m small room it
+    # found no arc it liked better than standing still and sat in the doorway,
+    # facing 50 deg off a straight path out (twice, with and without the
+    # Rotation Shim). RPP simply follows the planner's path towards a point
+    # lookahead_dist ahead, first turning on the spot if that point is more
+    # than rotate_to_heading_min_angle off, and stops only if its footprint
+    # would actually hit something. The planner's path already keeps clear of
+    # walls, so following it closely is what we want in tight spaces.
     FollowPath:
-      plugin: "nav2_rotation_shim_controller::RotationShimController"
-      primary_controller: "dwb_core::DWBLocalPlanner"
-      angular_dist_threshold: 0.785      # rad (45 deg)
-      forward_sampling_distance: 0.5     # m along the path used to judge its heading
-      rotate_to_heading_angular_vel: 0.4 # rad/s, same limit as DWB (sharp scans/images)
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      desired_linear_vel: 0.22
+      lookahead_dist: 0.4
+      min_lookahead_dist: 0.25
+      max_lookahead_dist: 0.6
+      lookahead_time: 1.5
+      use_velocity_scaled_lookahead_dist: false
+      rotate_to_heading_angular_vel: 0.4   # rad/s, the team's turn limit (sharp scans/images)
+      use_rotate_to_heading: true
+      rotate_to_heading_min_angle: 0.785   # rad; turn on the spot first if further off
       max_angular_accel: 1.6
-      simulate_ahead_time: 1.0
-      # DWB parameters (used by the shim's primary controller)
-      debug_trajectory_details: True
-      min_vel_x: 0.0
-      min_vel_y: 0.0
-      max_vel_x: 0.26
-      max_vel_y: 0.0
-      max_vel_theta: 0.4 # G31: was 1.0, avoid blurry LIDAR scans when turning
-      min_speed_xy: 0.0
-      max_speed_xy: 0.26
-      min_speed_theta: 0.0
-      # Add high threshold velocity for turtlebot 3 issue.
-      # https://github.com/ROBOTIS-GIT/turtlebot3_simulations/issues/75
-      acc_lim_x: 2.5
-      acc_lim_y: 0.0
-      acc_lim_theta: 3.2
-      decel_lim_x: -2.5
-      decel_lim_y: 0.0
-      decel_lim_theta: -3.2
-      vx_samples: 20
-      vy_samples: 5
-      vtheta_samples: 20
-      sim_time: 1.7
-      linear_granularity: 0.05
-      angular_granularity: 0.025
-      transform_tolerance: 0.5           # G31: was 0.2; SLAM's map->odom can lag while it
-                                         # processes a scan ("Transform data too old")
-      xy_goal_tolerance: 0.25
-      trans_stopped_velocity: 0.25
-      short_circuit_trajectory_evaluation: True
-      stateful: True
-      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      BaseObstacle.scale: 0.02
-      PathAlign.scale: 32.0
-      PathAlign.forward_point_distance: 0.1
-      GoalAlign.scale: 24.0
-      GoalAlign.forward_point_distance: 0.1
-      PathDist.scale: 32.0
-      GoalDist.scale: 24.0
-      RotateToGoal.scale: 32.0
-      RotateToGoal.slowing_factor: 5.0
-      RotateToGoal.lookahead_time: -1.0
+      allow_reversing: false
+      transform_tolerance: 0.5             # SLAM's map->odom can lag while it processes a scan
+      min_approach_linear_velocity: 0.05
+      approach_velocity_scaling_dist: 0.4
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.0
+      use_regulated_linear_velocity_scaling: true   # slow down on tight curves, which
+      regulated_linear_scaling_min_radius: 0.9      # also keeps the turn rate below
+      regulated_linear_scaling_min_speed: 0.1       # ~0.25 rad/s while driving
+      use_cost_regulated_linear_velocity_scaling: true  # slow down close to walls
+      cost_scaling_dist: 0.3               # m; must not exceed inflation_radius
+      cost_scaling_gain: 1.0
+      inflation_cost_scaling_factor: 8.0   # must equal the costmaps' cost_scaling_factor
+      use_interpolation: true
 
 local_costmap:
   local_costmap:
@@ -225,7 +204,13 @@ local_costmap:
       width: 3
       height: 3
       resolution: 0.05
-      robot_radius: 0.18                 # G31: was 0.22
+      # G31: the Waffle Pi's real outline (from its URDF) instead of a circle,
+      # so the controller and recoveries check what really touches the walls.
+      # base_footprint sits between the wheels: the body reaches 0.20 m
+      # behind it but only 0.07 m in front (camera 0.08), 0.153 m to each
+      # side, so turning on the spot sweeps the rear corners out to ~0.25 m.
+      # The global costmap keeps robot_radius 0.18 for planning.
+      footprint: "[[0.08, 0.16], [0.08, -0.16], [-0.21, -0.16], [-0.21, 0.16]]"
       plugins: ["voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
@@ -373,8 +358,8 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.26, 0.0, 1.0]
-    min_velocity: [-0.26, 0.0, -1.0]
+    max_velocity: [0.26, 0.0, 0.4]   # G31: turn rate capped at 0.4 rad/s everywhere
+    min_velocity: [-0.26, 0.0, -0.4]
     max_accel: [2.5, 0.0, 3.2]
     max_decel: [-2.5, 0.0, -3.2]
     odom_topic: "odom"
