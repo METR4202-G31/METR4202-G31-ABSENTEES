@@ -5,6 +5,7 @@ import numpy as np
 from aruco_detector_interfaces.msg import ArucoVerdict
 from geometry_msgs.msg import Point, Pose
 from rclpy.duration import Duration
+from visualization_msgs.msg import Marker
 from .CoordinatePublisher import CoordinatePublisher
 
 import tf2_ros
@@ -26,6 +27,7 @@ class MissionControl(Node):
         
         #publisher for publishing the detected markers
         self._coords_pub = CoordinatePublisher(node=self, coords_dict=self._markers, topic = "marker", namespace="detected aruco markers")
+        self._label_pub = self.create_publisher(Marker, "marker", 10)
 
         #to obtain the aruco information observable from the camera
         self._aruco_sub = self.create_subscription(
@@ -55,6 +57,27 @@ class MissionControl(Node):
 
     def _republish_markers(self):
         self._coords_pub.publish_coordinates()
+        self._publish_marker_labels()
+
+    def _publish_marker_labels(self):
+        stamp = self.get_clock().now().to_msg()
+        for marker_id, pose in self._markers.items():
+            label = Marker()
+            label.header.frame_id = "map"
+            label.header.stamp = stamp
+            label.ns = "aruco_marker_ids"
+            label.id = marker_id
+            label.type = Marker.TEXT_VIEW_FACING
+            label.action = Marker.ADD
+            label.pose = pose
+            label.pose.position.z += 0.25
+            label.scale.z = 0.2
+            label.color.r = 1.0
+            label.color.g = 1.0
+            label.color.b = 1.0
+            label.color.a = 1.0
+            label.text = f"ID: {marker_id}"
+            self._label_pub.publish(label)
 
     
     def __dist(self, pos: Point) -> float:
@@ -107,6 +130,7 @@ class MissionControl(Node):
             self._marker_weights[msg.id] = total_weight
 
         self._coords_pub.publish_coordinates()
+        self._publish_marker_labels()
 
 
     def transform_to_global(self, pose, header, target_frame='map') -> Pose | None:
