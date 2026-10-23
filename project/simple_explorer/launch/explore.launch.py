@@ -51,9 +51,11 @@ def generate_launch_description():
         }.items(),
     )
 
+    # Our own copy of the stock Nav2 params with a smaller robot_radius and
+    # tighter inflation for small mazes. See config/nav2_params.yaml.
     nav2_params = os.path.join(
-        nav2_bringup_dir,
-        "params",
+        get_package_share_directory("simple_explorer"),
+        "config",
         "nav2_params.yaml",
     )
 
