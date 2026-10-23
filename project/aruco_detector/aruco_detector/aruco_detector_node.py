@@ -93,9 +93,9 @@ class ArucoDetector(Node):
     def build_pose(self, tvec, rvec) -> Pose:
         pose = Pose()
 
-        pose.position.x = float(tvec[0]) * 2 #arbitrary multiplication by 2 that performed better in tests
-        pose.position.y = float(tvec[1]) * 2
-        pose.position.z = float(tvec[2]) * 2
+        pose.position.x = float(tvec[0]) * 2.26 # arbitrary multiplication that performed better in tests
+        pose.position.y = float(tvec[1]) * 2.26
+        pose.position.z = float(tvec[2]) * 2.26
 
         rot = Rotation.from_rotvec(rvec)
         quat = rot.as_quat()  # returns [x, y, z, w]
